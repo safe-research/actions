@@ -6,7 +6,7 @@ runs:
   steps:
     - name: Cache LCOV
       id: cache
-      uses: actions/cache@v4
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.lcov
         key: lcov-dfeb7505ef372f806ddb280b52a90f41cd8169cd
