@@ -1,3 +1,6 @@
+const { callModelWithFallback } = require("./llm.js");
+const { fetchPullRequest, fetchFiles, postReview } = require("./github.js");
+
 const MAX_ADDITIONAL_FILES = 15;
 
 const SYSTEM_PROMPT = `The current year is ${new Date().getFullYear()}. Newer versions of software, GitHub Actions, and model names than you're aware of from training may still be valid and correct. Do not flag version strings, action references (e.g. actions/checkout@vN), or model names as errors solely because they are unfamiliar to you.`;
@@ -117,93 +120,6 @@ const REVIEW_SCHEMA = {
   required: ["summary", "code_opinions", "issue_scratchpad", "refined_issues", "comments", "follow_ups", "research_links"],
 };
 
-async function callOpenAi(core, endpoint, apiKey, model, prompt, schemaName, schema, tools) {
-    if (tools !== undefined) core.warning("Tools not supported with open ai api!")
-    const url = `${endpoint.replace(/\/+$/, "")}/chat/completions`;
-    const body = {
-        model,
-        messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: prompt },
-        ],
-        response_format: {
-            type: "json_schema",
-            json_schema: { name: schemaName, schema, strict: true },
-        }
-    };
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(body),
-    });
-    const rawBody = await res.text();
-    core.debug(`ai-review: raw response from model "${model}" (${schemaName}, status ${res.status}): ${rawBody}`);
-
-    const data = JSON.parse(rawBody);
-    return JSON.parse(data.choices[0].message.content);
-}
-
-async function callGemini(core, endpoint, apiKey, model, prompt, schemaName, schema, tools) {
-  const url = `${endpoint.replace(/\/+$/, "")}/chat/completions`;
-  const body = {
-    // 1. System Prompt moves to its own dedicated object
-    system_instruction: {
-      parts: [{ text: SYSTEM_PROMPT }]
-    },
-    // 2. 'messages' becomes 'contents' and 'parts'
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: prompt }]
-      }
-    ],
-    // 3. 'response_format' becomes 'generationConfig'
-    generationConfig: {
-      responseMimeType: "application/json",
-      // Notice: The schema goes directly here, no 'type: "json_schema"' wrapper
-      responseSchema: schema
-    },
-    // 4. Grounding tool is now natively recognized
-    tools
-  };
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey
-    },
-    body: JSON.stringify(body),
-  });
-  const rawBody = await res.text();
-  core.debug(`ai-review: raw response from model "${model}" (${schemaName}, status ${res.status}): ${rawBody}`);
-
-  const data = JSON.parse(rawBody);
-  return JSON.parse(data.candidates[0].content.parts[0].text);
-}
-
-async function callModel(core, endpoint, apiKey, model, prompt, schemaName, schema, tools) {
-  if (endpoint === "https://generativelanguage.googleapis.com/v1beta/models/") {
-      return callGemini(core, endpoint, apiKey, model, prompt, schemaName, schema, tools);
-  } else {
-      return callOpenAi(core, endpoint, apiKey, model, prompt, schemaName, schema, tools)
-  }
-}
-
-async function callModelWithFallback(core, endpoint, apiKey, model, fallbackModel, prompt, schemaName, schema, tools) {
-  try {
-    return await callModel(core, endpoint, apiKey, model, prompt, schemaName, schema, tools);
-  } catch (err) {
-    if (!fallbackModel || fallbackModel === model) {
-      throw err;
-    }
-    core.warning(`ai-review: model "${model}" failed (${err.message}); retrying with fallback model "${fallbackModel}".`);
-    return callModel(core, endpoint, apiKey, fallbackModel, prompt, schemaName, schema, tools);
-  }
-}
-
 module.exports = async ({ github, context, core }) => {
   const apiKey = process.env.API_KEY;
   const endpoint = process.env.API_ENDPOINT;
@@ -219,13 +135,7 @@ module.exports = async ({ github, context, core }) => {
     return;
   }
 
-  const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-  const { data: diff } = await github.rest.pulls.get({
-    owner,
-    repo,
-    pull_number: prNumber,
-    mediaType: { format: "diff" },
-  });
+  const { pr, diff } = await fetchPullRequest(github, { owner, repo, prNumber });
   const description = pr.body || "(no description provided)";
 
   const contextPrompt = [
@@ -240,24 +150,19 @@ module.exports = async ({ github, context, core }) => {
     apiKey,
     contextModel,
     fallbackModel,
+    SYSTEM_PROMPT,
     contextPrompt,
     "requested_files",
     FILES_SCHEMA,
   );
 
   core.debug({requestedFiles})
-  const additionalFiles = [];
-  for (const path of (requestedFiles || []).slice(0, MAX_ADDITIONAL_FILES)) {
-    try {
-      const { data } = await github.rest.repos.getContent({ owner, repo, path, ref: pr.head.sha });
-      if (typeof data.content === "string") {
-        core.debug(`Added ${path} to context`)
-        additionalFiles.push({ path, content: Buffer.from(data.content, "base64").toString("utf8") });
-      }
-    } catch {
-      // requested file may not exist, be binary, or exceed the API size limit
-    }
-  }
+  const additionalFiles = await fetchFiles(github, core, {
+    owner,
+    repo,
+    ref: pr.head.sha,
+    paths: (requestedFiles || []).slice(0, MAX_ADDITIONAL_FILES),
+  });
   const additionalContext = additionalFiles.map((f) => `File: ${f.path}\n${f.content}`).join("\n\n");
 
   const { summary, comments } = await callModelWithFallback(
@@ -266,6 +171,7 @@ module.exports = async ({ github, context, core }) => {
     apiKey,
     model,
     fallbackModel,
+    SYSTEM_PROMPT,
     [
       `You are reviewing a GitHub pull request titled "${pr.title}".`,
       `PR description:\n${description}`,
@@ -283,14 +189,6 @@ module.exports = async ({ github, context, core }) => {
   );
 
   const body = `## ${title}\n\n${summary || "AI review"}`;
-  const inlineComments = (comments || []).map((c) => ({ path: c.path, line: c.line, body: c.body, side: "RIGHT" }));
 
-  try {
-    await github.rest.pulls.createReview({ owner, repo, pull_number: prNumber, body, event: "COMMENT", comments: inlineComments });
-  } catch (err) {
-    core.warning(`ai-review: failed to post review with inline comments (${err.message}); folding them into the review body instead.`);
-    const foldedComments = inlineComments.map((c) => `**${c.path}:${c.line}**\n${c.body}`).join("\n\n");
-    const foldedBody = foldedComments ? `${body}\n\n---\n\n${foldedComments}` : body;
-    await github.rest.pulls.createReview({ owner, repo, pull_number: prNumber, body: foldedBody, event: "COMMENT" });
-  }
+  await postReview(github, core, { owner, repo, prNumber, body, comments: comments || [] });
 };
