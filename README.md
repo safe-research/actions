@@ -76,6 +76,12 @@ node ai-review/local-test.js
 
 Set `GITHUB_TOKEN` to avoid GitHub's unauthenticated rate limit.
 
+Unit tests use the built-in Node.js test runner (no dependencies required):
+
+```sh
+node --test 'ai-review/test/*.test.js'
+```
+
 ### `install-cargo-llvm-cov`
 
 Installs `cargo-llvm-cov` v0.8.7 (x86_64 Linux, musl build) into `~/.cargo/bin` after verifying its SHA-256 checksum, and adds the `llvm-tools-preview` component to the active Rust toolchain. No inputs; requires `rustup`.
