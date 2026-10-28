@@ -32,6 +32,16 @@ function addUsage(total, usage) {
   }
 }
 
+const MAX_LOGGED_ARGUMENTS = 200;
+
+// One-line summary of a tool call and its result for the progress log; the full output is only logged as debug.
+function describeToolCall(call, content) {
+  const raw = call.function?.arguments || "";
+  const args = raw.length > MAX_LOGGED_ARGUMENTS ? `${raw.slice(0, MAX_LOGGED_ARGUMENTS)}…` : raw;
+  const result = content.startsWith("Error:") ? content.split("\n")[0] : `${Buffer.byteLength(content)} bytes`;
+  return `${call.function?.name}(${args}) -> ${result}`;
+}
+
 function parseArguments(raw) {
   if (raw === undefined || raw === "") return {};
   const args = JSON.parse(raw);
@@ -71,25 +81,31 @@ async function handleMessage(core, { messages, message, turn, toolsByName, maxTo
   const calls = message.tool_calls || [];
   if (calls.length === 0) {
     if (typeof message.content === "string" && message.content.trim() !== "") {
-      core.debug(`ai-review: turn ${turn}: model answered without tool calls; using the text as the report`);
+      core.info(`ai-review: turn ${turn}: model answered without tool calls; using the text as the report`);
       return message.content;
     }
+    core.info(`ai-review: turn ${turn}: empty answer without tool calls; asking the model to continue`);
     messages.push({ role: "user", content: NO_TOOL_CALL_PROMPT });
     return undefined;
+  }
+  if (typeof message.content === "string" && message.content.trim() !== "") {
+    core.debug(`ai-review: turn ${turn}: model text: ${message.content}`);
   }
   for (const call of calls) {
     let content;
     if (call.function?.name === SUBMIT_REVIEW_TOOL.function.name) {
       const { report, error } = readSubmission(call);
       if (report !== undefined) {
-        core.debug(`ai-review: turn ${turn}: review submitted`);
+        core.info(`ai-review: turn ${turn}: review submitted (${Buffer.byteLength(report)} bytes)`);
         return report;
       }
       content = error;
     } else {
       content = await runToolCall(call, toolsByName, maxToolOutputBytes);
     }
-    core.debug(`ai-review: turn ${turn}: ${call.function?.name}(${call.function?.arguments}) -> ${content}`);
+    core.info(`ai-review: turn ${turn}: ${describeToolCall(call, content)}`);
+    // Extends the info line above with the full output, unless that line already shows all of it (a one-line error).
+    if (!(content.startsWith("Error:") && !content.includes("\n"))) core.debug(content);
     messages.push({ role: "tool", tool_call_id: call.id, content });
   }
   return undefined;
@@ -98,6 +114,8 @@ async function handleMessage(core, { messages, message, turn, toolsByName, maxTo
 // Runs a tool-calling loop until the model calls `submit_review` (or answers in plain text).
 // `tools` are `{ name, description, parameters, run }` objects as returned by `createTools`; `run` receives the
 // parsed arguments and returns a string. Tool errors are reported back to the model instead of being thrown.
+// Progress (turns, tool calls, token usage) is logged with `core.info`; details (tool output, raw model responses)
+// with `core.debug`.
 async function runAgent(core, {
   endpoint,
   apiKey,
@@ -139,6 +157,12 @@ async function runAgent(core, {
     });
     currentModel = response.model;
     addUsage(usage, response.usage);
+    const toolCalls = response.message.tool_calls?.length || 0;
+    core.info(
+      `ai-review: turn ${turn}/${maxTurns} (${currentModel}): ${toolCalls} tool call(s), ` +
+      `${response.usage?.prompt_tokens ?? "?"} prompt + ${response.usage?.completion_tokens ?? "?"} completion tokens ` +
+      `(${usage.total_tokens} total so far)`,
+    );
     const report = await handleMessage(core, { messages, message: response.message, turn, toolsByName, maxToolOutputBytes });
     if (report !== undefined) return { report, turns: turn, model: currentModel, usage };
   }

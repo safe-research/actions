@@ -4,7 +4,7 @@ const { after, before, beforeEach, describe, it } = require("node:test");
 
 const { runAgent } = require("../agent.js");
 
-const core = { debug() {}, warning() {} };
+const core = { debug() {}, info() {}, warning() {} };
 
 function toolCall(id, name, args) {
   return { id, type: "function", function: { name, arguments: typeof args === "string" ? args : JSON.stringify(args) } };
@@ -242,6 +242,39 @@ describe("runAgent", () => {
 
     await assert.rejects(run(), /status 400: bad request/);
     assert.equal(fake.requests.length, 1);
+  });
+
+  it("logs progress as info and only the details as debug", async () => {
+    fake.script(
+      () => assistant({ toolCalls: [toolCall("c1", "read_file", { path: "a.js" }), toolCall("c2", "fail", {})] }),
+      () => assistant({ toolCalls: [toolCall("c3", "submit_review", { report: "Done." })] }),
+    );
+    const logs = { info: [], debug: [] };
+    const recordingCore = { info: (m) => logs.info.push(m), debug: (m) => logs.debug.push(m), warning() {} };
+    await runAgent(recordingCore, { endpoint, apiKey: "k", model: "primary", systemPrompt: "s", userPrompt: "u", tools: stubTools });
+    assert.deepEqual(logs.info, [
+      "ai-review: turn 1/40 (primary): 2 tool call(s), 10 prompt + 5 completion tokens (15 total so far)",
+      'ai-review: turn 1: read_file({"path":"a.js"}) -> 16 bytes',
+      "ai-review: turn 1: fail({}) -> Error: boom",
+      "ai-review: turn 2/40 (primary): 1 tool call(s), 10 prompt + 5 completion tokens (30 total so far)",
+      "ai-review: turn 2: review submitted (5 bytes)",
+    ]);
+    // Debug adds the raw responses and the full tool output; the one-line error is already complete in the info log.
+    assert.equal(logs.debug.length, 3);
+    assert.match(logs.debug[0], /^ai-review: raw response from model "primary" \(status 200\): /);
+    assert.equal(logs.debug[1], "contents of a.js");
+    assert.match(logs.debug[2], /^ai-review: raw response from model "primary" \(status 200\): /);
+  });
+
+  it("truncates long tool arguments in the progress log", async () => {
+    fake.script(
+      () => assistant({ toolCalls: [toolCall("c1", "read_file", { path: "p".repeat(500) })] }),
+      () => assistant({ toolCalls: [toolCall("c2", "submit_review", { report: "Done." })] }),
+    );
+    const info = [];
+    await runAgent({ ...core, info: (m) => info.push(m) }, { endpoint, apiKey: "k", model: "primary", systemPrompt: "s", userPrompt: "u", tools: stubTools });
+    const line = info.find((m) => m.includes("read_file("));
+    assert.equal(line, `ai-review: turn 1: read_file(${'{"path":"'}${"p".repeat(191)}…) -> ${Buffer.byteLength(`contents of ${"p".repeat(500)}`)} bytes`);
   });
 
   it("rejects tools named submit_review", async () => {

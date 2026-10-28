@@ -123,7 +123,9 @@ There is no network access (no \`curl\`, no \`git fetch\`, no GitHub API) and no
 
 ## Output
 
-When you are done, call \`submit_review\` exactly once with the complete report in Markdown, in the format the instructions describe. Don't write the report as a plain message.`;
+When you are done, call \`submit_review\` exactly once with the complete report in Markdown, in the format the instructions describe. Don't write the report as a plain message.
+
+You can't compute SHA-256 hashes. In links to the "Files changed" view, write the literal placeholder \`<file hash>\` instead of the hash and give the file path in the link text, e.g. [\`src/app.js:42-48\`](${pr.html_url}/files#diff-<file hash>R42-R48). The hash is filled in from the link text when the review is posted.`;
 }
 
 function buildSkillIndex(otherSkills) {

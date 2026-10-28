@@ -147,6 +147,7 @@ describe("prompt assembly", () => {
       "call `submit_review` exactly once",
       "no network access",
       "no subagents",
+      "(https://github.com/acme/widgets/pull/42/files#diff-<file hash>R42-R48)",
     ]) {
       assert.ok(preamble.includes(expected), `missing: ${expected}`);
     }
