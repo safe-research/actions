@@ -28,6 +28,40 @@ function fillDiffAnchors(report, prUrl) {
   });
 }
 
+// Line numbers of the new file version that a unified diff patch shows (added and context lines). Review comments on
+// the RIGHT side can only be placed on these lines.
+function parseCommentableLines(patch) {
+  const lines = new Set();
+  let line = 0;
+  for (const row of patch.split("\n")) {
+    // Hunk header `@@ -a,b +c,d @@`: the new version's lines of this hunk start at c (group 1).
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row);
+    if (hunk) {
+      line = parseInt(hunk[1]);
+    } else if (line > 0 && (row.startsWith("+") || row.startsWith(" "))) {
+      lines.add(line++);
+    }
+    // `-` lines only exist in the old version and `\ No newline at end of file` in neither.
+  }
+  return lines;
+}
+
+const MAX_FILE_PAGES = 30; // the API lists at most 3000 files
+
+// Maps each file path of the PR to the lines that can take an inline comment. Files without a patch (binary or too
+// large a diff) have no commentable lines.
+async function fetchCommentableLines(github, { owner, repo, prNumber }) {
+  const commentable = new Map();
+  for (let page = 1; page <= MAX_FILE_PAGES; page++) {
+    const { data: files } = await github.rest.pulls.listFiles({ owner, repo, pull_number: prNumber, per_page: 100, page });
+    for (const file of files) {
+      commentable.set(file.filename, file.patch ? parseCommentableLines(file.patch) : new Set());
+    }
+    if (files.length < 100) break;
+  }
+  return commentable;
+}
+
 async function postReview(github, core, { owner, repo, prNumber, body, comments = [] }) {
   const inlineComments = comments.map((c) => ({ path: c.path, line: c.line, body: c.body, side: "RIGHT" }));
 
@@ -41,4 +75,4 @@ async function postReview(github, core, { owner, repo, prNumber, body, comments 
   }
 }
 
-module.exports = { fetchPullRequest, fillDiffAnchors, postReview };
+module.exports = { fetchPullRequest, fillDiffAnchors, parseCommentableLines, fetchCommentableLines, postReview };
