@@ -20,7 +20,8 @@ Steps (one PR each unless noted):
 5. **Switch over:** check out the PR and the agents repo in `action.yaml`, wire 2–4 together, remove the two-pass flow, and update the README and `local-test.js`.
 6. **Inline comments (optional):** have `submit_review` return structured findings and post them as inline comments.
 7. **HTTP access (optional):** a `fetch_url` tool for any public host (or a configured list of hosts), minus a blocklist, so the skill's `curl` steps work.
-8. **Cleanup:** remove this plan.
+8. **Finding check (optional):** check each staged finding with a small model in an independent request and drop the ones that don't name a problem or propose a fix.
+9. **Cleanup:** remove this plan.
 
 ---
 
@@ -86,6 +87,7 @@ ai-review/
   skills.js        # SKILL.md loading + prompt assembly (Phase 4)
   findings.js      # finding staging tools + review rendering (Phase 6)
   fetch.js         # fetch_url tool (Phase 7)
+  check.js         # finding check (Phase 8)
   local-test.js    # + local checkout / skills dir support
   test/*.test.js   # node:test, run with `node --test 'ai-review/test/*.test.js'`
 ```
@@ -99,6 +101,7 @@ ai-review/
 | `max-turns` | **new** | Agent loop limit, default `40` |
 | `fetch-allowlist` | **new** (Phase 7, optional) | Hosts the agent may fetch from (comma- or newline-separated), or `*` for any public host; empty (default) disables network access |
 | `fetch-blocklist` | **new** (Phase 7, optional) | Domains (with their subdomains) the agent may never fetch from, e.g. the tailnet |
+| `check-model` | **new** (Phase 8, optional) | Model that checks each staged finding before posting; empty disables the check |
 | `context-model` | **removed** | The agent collects its own context |
 | `api-key`, `endpoint`, `model`, `fallback-model`, `github-token`, `pr-number`, `title` | unchanged | |
 
@@ -205,7 +208,18 @@ The skill uses `curl` for the GitHub API, for interfaces outside the repository 
 
 Risk: anything on an allowed host becomes reachable, and the URL itself is a channel out of the job. Prompt injection in the PR could make the agent put repository content into a query string sent to a host the attacker controls. For public repositories that leaks nothing new; for private repositories consumers should leave network access disabled or only allow hosts that don't log or expose request URLs to third parties. Requests are unauthenticated, so the agent still can't write anything via the GitHub API, and the address checks keep it out of the runner's local network and tailnet.
 
-### Phase 8 — Remove this plan
+### Phase 8 — Check staged findings *(optional, after Phase 6)*
+
+Real runs produced "findings" that only confirmed the change was correct (e.g. a 🔴 Blocking finding explaining why the fix is right). The skill asks for actionable findings, but the review model doesn't always follow that.
+
+- `check.js`: after the agent loop, each staged finding is sent to `check-model` in its own minimal request: a short system prompt plus the finding's priority, location, title and fenced body; no tools, no review context. The model answers `KEEP` or `DROP: <reason>`, a format any OpenAI-compatible model can produce (no `response_format` needed). Requests run in parallel.
+- Criteria: the finding names a problem that still exists in the PR's code (not a description of what the PR does, a problem the PR already fixes, praise, a confirmation, an open question or a vague "might be an issue"), and it proposes a change the author should make. The check model can't see the code, so it doesn't judge correctness; the review model already verified that. The "still exists" wording matters: with a plain "describes a problem and a fix", small models kept the finding from the motivating run, reading the PR's own fix as the finding's problem and fix. Asking the model to reason before its verdict didn't help; it made models invent fixes for vague findings.
+- Fails open: if a request fails or the answer has no verdict, the finding is kept with a warning, so the check can't lose real findings.
+- New input `check-model` (env `CHECK_MODEL`), default `gemini-3.5-flash-lite`; empty disables the check. It uses the same endpoint and API key. Dropped findings are logged with the reason, and the check's token usage gets its own row in the job summary.
+- Decided: one request per finding rather than one for all, so each check stays small enough for a small model and one bad answer only affects one finding. On a local endpoint, Qwen3-Coder-30B-A3B, Gemma-4-26B-A4B and Gemma 4 E4B consistently dropped the "the fix is correct" finding and kept two real bugs; a vague "might be a race condition" finding without a fix was dropped only some of the time. Llama 3.2 1B dropped everything.
+- `test/check.test.js`: verdict parsing, prompt building, and against a fake endpoint: dropping, failing open, and one tool-less request per finding.
+
+### Phase 9 — Remove this plan
 
 - Delete `epics/2026_10_27_skill_based_ai_review.md`.
 
