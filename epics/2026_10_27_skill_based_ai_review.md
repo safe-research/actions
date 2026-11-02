@@ -19,7 +19,7 @@ Steps (one PR each unless noted):
 4. **Skill loading:** load `SKILL.md` files from a directory and build the system prompt from the main skill plus an index of the other skills.
 5. **Switch over:** check out the PR and the agents repo in `action.yaml`, wire 2–4 together, remove the two-pass flow, and update the README and `local-test.js`.
 6. **Inline comments (optional):** have `submit_review` return structured findings and post them as inline comments.
-7. **Allowlisted HTTP access (optional):** a `fetch_url` tool limited to a configured list of hosts, so the skill's `curl` steps work for trusted domains.
+7. **HTTP access (optional):** a `fetch_url` tool for any public host (or a configured list of hosts), minus a blocklist, so the skill's `curl` steps work.
 8. **Cleanup:** remove this plan.
 
 ---
@@ -45,7 +45,7 @@ Project rules such as `snippets/coding-guidelines.md` and `snippets/testing-guid
 `review-pr` needs an agent: it has to read files, grep for callers, run `git diff`/`git log`, and decide on its own what context to collect. We implement a small tool-calling loop over the existing chat completions endpoint (`tools` / `tool_calls`) instead of adopting an agent CLI:
 
 - **Provider-agnostic:** Gemini (default), self-hosted OpenAI-compatible servers (e.g. reached via Tailscale), and fallback models keep working.
-- **No arbitrary shell:** the tools are JS functions. `git` runs via `execFile` with an allowlist of read-only subcommands. Paths are confined to the PR checkout. Nothing has network access by default; the optional Phase 7 adds HTTP GET requests limited to an allowlist of hosts. This limits what prompt injection in a PR can do.
+- **No arbitrary shell:** the tools are JS functions. `git` runs via `execFile` with an allowlist of read-only subcommands. Paths are confined to the PR checkout. Nothing has network access by default; the optional Phase 7 adds unauthenticated HTTP GET requests to public hosts. This limits what prompt injection in a PR can do.
 - **No new runtime dependencies:** it still runs inside `actions/github-script`, and `local-test.js` keeps working.
 
 The skill's instructions are written for a shell (`curl`, `git`, `sha256sum`, `GITHUB_EVENT_PATH`). An **environment preamble** in the action closes that gap, so the skill doesn't need CI-specific changes:
@@ -85,6 +85,7 @@ ai-review/
   agent.js         # tool-calling loop (Phase 3)
   skills.js        # SKILL.md loading + prompt assembly (Phase 4)
   findings.js      # finding staging tools + review rendering (Phase 6)
+  fetch.js         # fetch_url tool (Phase 7)
   local-test.js    # + local checkout / skills dir support
   test/*.test.js   # node:test, run with `node --test 'ai-review/test/*.test.js'`
 ```
@@ -96,7 +97,8 @@ ai-review/
 | `skills-ref` | **new** | Commit SHA of `safe-research/agents`; defaults to a pinned SHA |
 | `skill` | **new** | Main skill name, default `review-pr` |
 | `max-turns` | **new** | Agent loop limit, default `40` |
-| `fetch-allowlist` | **new** (Phase 7, optional) | Hosts the agent may fetch from (comma- or newline-separated); empty (default) disables network access |
+| `fetch-allowlist` | **new** (Phase 7, optional) | Hosts the agent may fetch from (comma- or newline-separated), or `*` for any public host; empty (default) disables network access |
+| `fetch-blocklist` | **new** (Phase 7, optional) | Domains (with their subdomains) the agent may never fetch from, e.g. the tailnet |
 | `context-model` | **removed** | The agent collects its own context |
 | `api-key`, `endpoint`, `model`, `fallback-model`, `github-token`, `pr-number`, `title` | unchanged | |
 
@@ -116,7 +118,7 @@ Consumer workflows don't change, apart from dropping `context-model` if they set
 | `list_files(path?, pattern?)` | Lists tracked files (`git ls-files`), optionally filtered by glob. |
 | `grep(pattern, path?)` | Runs `git grep -n` in the PR checkout. Output is capped. |
 | `git(args[])` | Allowlist: `diff`, `log`, `show`, `merge-base`, `rev-parse`, `cat-file -e`, `ls-files`, `status`. Always passes `--no-ext-diff --no-textconv` where they apply, and rejects `-c`, `--output`, and `-C`. Runs with `GIT_CONFIG_NOSYSTEM=1` and an empty `HOME`, so repo or global config can't trigger helpers. |
-| `fetch_url(url)` | *Optional, Phase 7.* HTTPS GET of a URL whose host is in `fetch-allowlist`; only offered when the input is set. |
+| `fetch_url(url, raw?)` | *Optional, Phase 7.* Unauthenticated HTTPS GET of a URL whose host is allowed by `fetch-allowlist`, not blocked, and resolves to public addresses only; the response is returned as text. Only offered when the input is set. |
 | `add_finding(path, line, priority, title, body)`, `remove_finding(id)` | *Phase 6.* Stage or remove a finding; the result lists the staged findings and where each will be posted. |
 | `submit_review(report)` | Ends the loop and returns the Markdown report (without the findings since Phase 6). |
 
@@ -183,22 +185,25 @@ Merge `feat/pr_review` into `main` of the agents repo. This is required before P
 - Why staging: staged findings survive a review that hits the turn limit (they're posted with a note instead of failing the run), each finding is validated on its own with errors sent back to the model, and calls stay small. Each result lists the staged findings and where each will be posted, so the model can see what it has staged. A final "review all staged findings" step builds on this (separate PR).
 - Decided: `report` is the skill's report without the findings. The action sorts the findings by priority, numbers them, and adds the heading and a location link (to the file at the head SHA for findings in the body, since "Files changed" anchors only resolve to lines of the diff). "Changed lines" are the right-side lines of the patches from `pulls.listFiles` (added and context lines), the only ones GitHub accepts for comments; they're fetched before the loop, so `add_finding` can tell the model when a line isn't in the diff. If listing the files fails, all findings go into the body.
 
-### Phase 7 — Allowlisted HTTP access *(optional, after Phase 5)*
+### Phase 7 — HTTP access *(optional, after Phase 5)*
 
-The skill uses `curl` for the GitHub API, for interfaces outside the repository ("check them as they were when the PR was written"), and for docs. Give the agent read-only HTTP access, limited to hosts the consumer explicitly allows.
+The skill uses `curl` for the GitHub API, for interfaces outside the repository ("check them as they were when the PR was written"), and for docs. Give the agent read-only HTTP access, so it can load documentation (e.g. `docs.rs`), look up package details (e.g. the latest version on `registry.npmjs.org`) and search GitHub and Stack Overflow for related code.
 
-- New input `fetch-allowlist`, passed to `review.js` as the `FETCH_ALLOWLIST` env var: a comma- or newline-separated list of hostnames, e.g. `api.github.com, raw.githubusercontent.com`. A URL is allowed if its hostname (`new URL(url).hostname`) exactly equals one of them; no wildcards or subdomains. Empty (the default) keeps today's behaviour: no `fetch_url` tool and no network access.
-- `fetch_url(url)` tool in `tools.js`, implemented with Node's `fetch` rather than by spawning `curl`, so there are no flags to abuse (`-o`, `-d`, `-K`, `file://`, …):
-  - `https:` only, `GET` only, no request body, and no credentials: no `github-token`, no cookies, no `Authorization` header from the environment.
-  - Redirects aren't followed; a redirect response is returned to the model as an error naming the target, which it can fetch if that host is allowed.
-  - Timeout (e.g. 15 s) and the same 50 KB output cap as the other tools.
+- New inputs `fetch-allowlist` and `fetch-blocklist`, passed to `review.js` as `FETCH_ALLOWLIST` and `FETCH_BLOCKLIST`: comma- or newline-separated lists. The allowlist is either `*` (any public host) or exact hostnames; the blocklist holds domains that are blocked with all their subdomains (e.g. the tailnet's `ts.net` domain). An empty allowlist (the default) keeps today's behaviour: no `fetch_url` tool and no network access.
+- Decided: `*` instead of only exact hosts. We mostly review public repositories, and the action runs read-only without secrets in the agent, so the exfiltration risk below is acceptable, and a fixed host list would rule out most docs sites.
+- `fetch_url(url, raw?)` tool in `fetch.js`, implemented with `node:https` rather than by spawning `curl`, so there are no flags to abuse (`-o`, `-d`, `-K`, `file://`, …):
+  - `https:` on the default port only, `GET` only, no request body, and no credentials: no `github-token`, no cookies, no `Authorization` header from the environment.
+  - Hostnames only: IP addresses (in any notation) and single-label names are rejected, and `localhost`, `.local`, `.internal` and `.home.arpa` are always blocked. Every resolved address must be public (no loopback, private, link-local, Tailscale `100.64.0.0/10`/`fd7a:115c:a1e0::/48` or reserved ranges); this is checked in the socket's `lookup`, so it applies to the address actually connected to.
+  - Redirects are followed (up to 5), and every hop is checked like the original URL.
+  - The response is always decoded as text (charset from `Content-Type`, UTF-8 otherwise); HTML is reduced to its text unless `raw` is set.
+  - Timeout of 15 s, at most 1 MB downloaded, and the same 50 KB output cap as the other tools.
   - Each request is logged with `core.info` (URL and status), so the job log shows what the agent fetched.
-- The environment preamble (`skills.js`) lists `fetch_url` and the allowed hosts when it's enabled, instead of saying there's no network access, and tells the model to use `fetch_url` where the skill says `curl`.
-- `local-test.js` reads `FETCH_ALLOWLIST` from the environment as well.
-- `test/tools.test.js`: allowlist parsing, exact host matching (`allowed.com.evil.com`, `https://allowed.com@evil.com/`), non-HTTPS URLs, redirects, and the output cap, against a local fake server. `test/skills.test.js`: preamble with and without the allowlist.
-- README: document the input and the trade-off below.
+- The environment preamble (`skills.js`) describes `fetch_url` and the allowed and blocked hosts when it's enabled, instead of saying there's no network access, tells the model to use it where the skill says `curl`, and, for `*`, gives example URLs for docs, package registries, GitHub and Stack Overflow.
+- `local-test.js` reads `FETCH_ALLOWLIST` and `FETCH_BLOCKLIST` from the environment as well.
+- `test/fetch.test.js`: list parsing, exact host matching (`allowed.com.evil.com`, `https://allowed.com@evil.com/`), IP addresses, blocklist, non-public resolved addresses, non-HTTPS URLs, redirects, text decoding, HTML extraction and the caps, against a local fake server. `test/skills.test.js`: preamble with and without network access.
+- README: document the inputs, the use cases and the trade-off below.
 
-Risk: anything on an allowed domain becomes reachable, and the URL itself is a channel out of the job. Prompt injection in the PR could make the agent put repository content into a query string sent to an allowed host. For public repositories that leaks nothing new; for private repositories consumers should only allow hosts that don't log or expose request URLs to third parties. Requests are unauthenticated, so the agent still can't write anything via the GitHub API.
+Risk: anything on an allowed host becomes reachable, and the URL itself is a channel out of the job. Prompt injection in the PR could make the agent put repository content into a query string sent to a host the attacker controls. For public repositories that leaks nothing new; for private repositories consumers should leave network access disabled or only allow hosts that don't log or expose request URLs to third parties. Requests are unauthenticated, so the agent still can't write anything via the GitHub API, and the address checks keep it out of the runner's local network and tailnet.
 
 ### Phase 8 — Remove this plan
 

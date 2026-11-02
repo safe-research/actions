@@ -26,7 +26,7 @@ Runs the [`review-pr`](https://github.com/safe-research/agents/tree/main/skills/
 
 1. The PR head (with full history) is checked out to `.ai-review/pr` and `safe-research/agents` at `skills-ref` to `.ai-review/agents`, both with `persist-credentials: false`.
 2. The system prompt is assembled from an environment preamble (PR metadata, how the skill's shell commands map to the tools), the body of `skill`, and an index of the other skills, which the model can read on demand.
-3. The model explores the checkout with read-only tools until it calls `submit_review` with its Markdown report: `read_file`, `list_files`, `grep` (`git grep`), and `git` (only `diff`, `log`, `show`, `merge-base`, `rev-parse`, `cat-file -e`, `ls-files`, `status`). Paths are confined to the two checkouts; there is no shell and no network access, and the tools never see `github-token`. After `max-turns` turns the model is asked to submit what it has.
+3. The model explores the checkout with read-only tools until it calls `submit_review` with its Markdown report: `read_file`, `list_files`, `grep` (`git grep`), and `git` (only `diff`, `log`, `show`, `merge-base`, `rev-parse`, `cat-file -e`, `ls-files`, `status`). Paths are confined to the two checkouts; there is no shell, no network access unless [`fetch-allowlist`](#network-access) is set, and the tools never see `github-token`. After `max-turns` turns the model is asked to submit what it has.
 4. The report is posted as a `COMMENT` review under a `## <title>` heading. The `<file hash>` placeholders in its "Files changed" links are filled in with the SHA-256 of the linked path.
 5. While reviewing, the model stages each verified finding with `add_finding` (and can take it back with `remove_finding`); each result shows the staged findings and whether they will be posted inline. The findings are numbered by priority: those on lines shown in the PR diff are posted as inline comments of the same review, the others are added to the review body under their priority section with a link to the file. If GitHub rejects the inline comments, they're appended to the review body instead. If the model doesn't submit a report within the turn limit, the staged findings are still posted.
 
@@ -46,6 +46,8 @@ The log shows the progress: each step, and for every turn the model, the token u
 | `skills-ref` | no | pinned commit | Commit SHA of `safe-research/agents` to load the skills from |
 | `skill` | no | `review-pr` | Skill whose instructions define the review |
 | `max-turns` | no | `40` | Maximum number of agent turns (model requests) before the report is requested |
+| `fetch-allowlist` | no | `""` | Hosts the agent may send HTTPS GET requests to (comma- or newline-separated exact hostnames), or `*` for any public host; empty disables network access. See [Network access](#network-access) |
+| `fetch-blocklist` | no | `""` | Domains the agent may never fetch from, including their subdomains (e.g. your tailnet's `ts.net` domain) |
 
 Requires `contents: read` and `pull-requests: write` permissions. Because the action checks out the PR's code (it only reads it, nothing is executed), don't run it on `pull_request_target`; fork PRs without access to the API key secret can't be reviewed.
 
@@ -73,6 +75,32 @@ jobs:
           title: "Gemini Code Review"
 ```
 
+#### Network access
+
+By default the agent has no network access. With `fetch-allowlist` set, it gets a `fetch_url` tool, which it uses where the skill says `curl`. This lets it check what the PR relies on as it is today instead of relying on its training data, for example:
+
+- load documentation, e.g. `https://docs.rs/<crate>/<version>/...`;
+- look up package details such as the latest version on npm (`https://registry.npmjs.org/<package>/latest`), crates.io or PyPI;
+- search GitHub (`api.github.com/search/repositories`, `/search/issues`) and Stack Overflow (`api.stackexchange.com`) for related code and issues, and read files of other repositories via `raw.githubusercontent.com`. GitHub's code search needs authentication, so it isn't available.
+
+`fetch-allowlist: "*"` allows any public host; a list of hostnames allows only exactly those hosts (no wildcards or subdomains). Either way:
+
+- Only unauthenticated `GET` requests to `https://` URLs on the default port are sent: no `github-token`, no cookies, no other credentials.
+- URLs must use a hostname with at least one dot; IP addresses are rejected. Every hostname must resolve only to public addresses. This is checked on the address the connection is actually made to, so names resolving to loopback, private networks, link-local addresses (e.g. cloud metadata) or the Tailscale range (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) are refused. `localhost`, `.local`, `.internal` and `.home.arpa` names are always blocked, plus the domains in `fetch-blocklist`, e.g. `fetch-blocklist: tail1234.ts.net` for your tailnet's MagicDNS names.
+- Redirects are followed (up to 5) and every hop is checked the same way.
+- The response is always decoded as text, whatever its content type. HTML pages are reduced to their text (the model can ask for the raw source). Requests time out after 15 s; at most 1 MB is downloaded and 50 KB is returned to the model.
+- Every request is logged with its status in the job log.
+
+The risk: anything on an allowed host becomes reachable, and the URL itself is a channel out of the job. Prompt injection in the PR could make the agent put repository content into a URL sent to a host the attacker controls, which is why `*` is only acceptable when that content is public anyway. The action runs read-only and the agent's tools have no access to secrets. Use it for public repositories; for private ones, use an explicit list of hosts that don't expose request URLs to third parties, or leave network access disabled.
+
+```yaml
+      - uses: safe-research/actions/ai-review@<ref>
+        with:
+          api-key: ${{ secrets.GEMINI_API_KEY }}
+          fetch-allowlist: "*"
+          fetch-blocklist: tail1234.ts.net
+```
+
 For Gemini, get an API key from [Google AI Studio](https://aistudio.google.com/app/apikey). Any other OpenAI-compatible server works by setting `endpoint` and the model inputs (e.g. a self-hosted server reached via [`tailscale/github-action`](https://github.com/tailscale/github-action)).
 
 #### Local testing
@@ -87,7 +115,7 @@ MODEL=gemini-3.6-flash FALLBACK_MODEL=gemini-3.5-flash-lite \
 node ai-review/local-test.js
 ```
 
-`SKILL` and `MAX_TURNS` are read from the environment as well. `DEBUG=1` also prints the details: the system prompt, the full output of every tool call, and the raw model responses. Set `GITHUB_TOKEN` to avoid GitHub's unauthenticated rate limit.
+`SKILL`, `MAX_TURNS`, `FETCH_ALLOWLIST` and `FETCH_BLOCKLIST` are read from the environment as well. `DEBUG=1` also prints the details: the system prompt, the full output of every tool call, and the raw model responses. Set `GITHUB_TOKEN` to avoid GitHub's unauthenticated rate limit.
 
 Instead of passing the variables on the command line, you can put them in a `.env` file (one `KEY=value` per line) in the directory you run the script from; it's ignored by git. Variables set in the shell take precedence over the file:
 
