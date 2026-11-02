@@ -40,6 +40,14 @@ inputs:
     description: "Maximum number of agent turns before the model is asked to submit its review"
     required: false
     default: "40"
+  fetch-allowlist:
+    description: "Hosts the agent may send HTTPS GET requests to (comma- or newline-separated exact hostnames), or * for any public host; empty disables network access"
+    required: false
+    default: ""
+  fetch-blocklist:
+    description: "Domains the agent may never fetch from, including their subdomains (comma- or newline-separated), e.g. your tailnet's ts.net domain"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -71,6 +79,8 @@ runs:
         TITLE: ${{ inputs.title }}
         SKILL: ${{ inputs.skill }}
         MAX_TURNS: ${{ inputs.max-turns }}
+        FETCH_ALLOWLIST: ${{ inputs.fetch-allowlist }}
+        FETCH_BLOCKLIST: ${{ inputs.fetch-blocklist }}
         REPO_PATH: ${{ github.workspace }}/.ai-review/pr
         SKILLS_PATH: ${{ github.workspace }}/.ai-review/agents
       with:

@@ -1,4 +1,5 @@
 const { runAgent, DEFAULT_MAX_TURNS } = require("./agent.js");
+const { createFetchTool, parseHostList } = require("./fetch.js");
 const { createFindingTools, renderReview } = require("./findings.js");
 const { fetchPullRequest, fillDiffAnchors, fetchCommentableLines, postReview } = require("./github.js");
 const { DEFAULT_SKILL, loadSkills, selectSkills, buildEnvironmentPreamble, buildSystemPrompt, buildUserPrompt } = require("./skills.js");
@@ -24,6 +25,9 @@ module.exports = async ({ github, context, core }) => {
   const skillsPath = process.env.SKILLS_PATH;
   const skillName = process.env.SKILL || DEFAULT_SKILL;
   const maxTurns = parseMaxTurns(process.env.MAX_TURNS);
+  // An empty allowlist disables `fetch_url`, so the agent has no network access.
+  const allowedHosts = parseHostList(process.env.FETCH_ALLOWLIST);
+  const fetch = allowedHosts.length > 0 ? { allowedHosts, blockedHosts: parseHostList(process.env.FETCH_BLOCKLIST) } : undefined;
   const { owner, repo } = context.repo;
 
   if (!prNumber) {
@@ -57,13 +61,18 @@ module.exports = async ({ github, context, core }) => {
     repository: `${owner}/${repo}`,
     serverUrl: context.serverUrl,
     repoPath,
-    skillsPath,
+    fetch,
   });
 
   const systemPrompt = `${SYSTEM_PROMPT}\n\n${buildSystemPrompt({ preamble, mainSkill, otherSkills })}`;
   core.debug(`ai-review: system prompt:\n${systemPrompt}`);
   core.info(`ai-review: starting review of ${repoPath} with "${model}" (fallback "${fallbackModel || "none"}", max ${maxTurns} turns, system prompt ${Buffer.byteLength(systemPrompt)} bytes)`);
   const findingTools = createFindingTools({ repoPath, commentable });
+  const tools = [...createTools({ repoPath, skillsPath }), ...findingTools.tools];
+  if (fetch) {
+    core.info(`ai-review: fetch_url enabled for ${allowedHosts.join(", ")}; blocked: ${fetch.blockedHosts.join(", ") || "none"}`);
+    tools.push(createFetchTool({ ...fetch, onRequest: (message) => core.info(`ai-review: fetch_url: ${message}`) }));
+  }
   const result = await runAgent(core, {
     endpoint,
     apiKey,
@@ -71,7 +80,7 @@ module.exports = async ({ github, context, core }) => {
     fallbackModel,
     systemPrompt,
     userPrompt: buildUserPrompt(pr),
-    tools: [...createTools({ repoPath, skillsPath }), ...findingTools.tools],
+    tools,
     maxTurns,
   });
   core.info(`ai-review: review finished by "${result.model}" after ${result.turns} turns (${result.usage.total_tokens} tokens).`);
