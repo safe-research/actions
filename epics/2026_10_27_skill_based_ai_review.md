@@ -60,7 +60,7 @@ The agent's tools never see `github-token`. The token is only used before the lo
 
 ### Output
 
-The skill's Markdown report (Step 5 format, with "Files changed" links) is posted as a `COMMENT` review body under the existing `## <title>` heading. The model can't compute the SHA-256 anchors without a shell, so the preamble tells it to write a `<file hash>` placeholder, and the action fills in the SHA-256 of the path from the link text when posting. Inline comments are deferred to the optional Phase 6.
+The skill's Markdown report (Step 5 format, with "Files changed" links) is posted as a `COMMENT` review body under the existing `## <title>` heading. The model can't compute the SHA-256 anchors without a shell, so the preamble tells it to write a `<file hash>` placeholder, and the action fills in the SHA-256 of the path from the link text when posting. Since Phase 6, the findings are staged separately with `add_finding`: those on lines shown in the PR diff are posted as inline comments, the rest are added to the body under their priority section.
 
 ### Alternatives Considered
 
@@ -84,6 +84,7 @@ ai-review/
   tools.js         # read-only tools (Phase 2)
   agent.js         # tool-calling loop (Phase 3)
   skills.js        # SKILL.md loading + prompt assembly (Phase 4)
+  findings.js      # finding staging tools + review rendering (Phase 6)
   local-test.js    # + local checkout / skills dir support
   test/*.test.js   # node:test, run with `node --test 'ai-review/test/*.test.js'`
 ```
@@ -116,7 +117,8 @@ Consumer workflows don't change, apart from dropping `context-model` if they set
 | `grep(pattern, path?)` | Runs `git grep -n` in the PR checkout. Output is capped. |
 | `git(args[])` | Allowlist: `diff`, `log`, `show`, `merge-base`, `rev-parse`, `cat-file -e`, `ls-files`, `status`. Always passes `--no-ext-diff --no-textconv` where they apply, and rejects `-c`, `--output`, and `-C`. Runs with `GIT_CONFIG_NOSYSTEM=1` and an empty `HOME`, so repo or global config can't trigger helpers. |
 | `fetch_url(url)` | *Optional, Phase 7.* HTTPS GET of a URL whose host is in `fetch-allowlist`; only offered when the input is set. |
-| `submit_review(report)` | Ends the loop and returns the Markdown report. |
+| `add_finding(path, line, priority, title, body)`, `remove_finding(id)` | *Phase 6.* Stage or remove a finding; the result lists the staged findings and where each will be posted. |
+| `submit_review(report)` | Ends the loop and returns the Markdown report (without the findings since Phase 6). |
 
 All paths are resolved with `realpath` and must stay inside `REPO_PATH` or `SKILLS_PATH`. Symlinks that point outside are rejected.
 
@@ -177,8 +179,9 @@ Merge `feat/pr_review` into `main` of the agents repo. This is required before P
 
 ### Phase 6 — Inline comments *(optional, after Phase 5)*
 
-- Extend `submit_review` with an optional `findings[]` (`path`, `line`, `priority`, `body`) next to `report`. Post findings on changed lines as inline comments and keep the rest in the body. The fold-into-body fallback stays.
-- Only worth doing if the posted reports turn out to be hard to act on as a single comment.
+- Instead of returning all findings with `submit_review`, the model stages them one at a time with `add_finding(path, line, priority, title, body)` and can drop them with `remove_finding(id)` (`findings.js`). Findings on changed lines are posted as inline comments; the rest go into the body. The fold-into-body fallback stays.
+- Why staging: staged findings survive a review that hits the turn limit (they're posted with a note instead of failing the run), each finding is validated on its own with errors sent back to the model, and calls stay small. Each result lists the staged findings and where each will be posted, so the model can see what it has staged. A final "review all staged findings" step builds on this (separate PR).
+- Decided: `report` is the skill's report without the findings. The action sorts the findings by priority, numbers them, and adds the heading and a location link (to the file at the head SHA for findings in the body, since "Files changed" anchors only resolve to lines of the diff). "Changed lines" are the right-side lines of the patches from `pulls.listFiles` (added and context lines), the only ones GitHub accepts for comments; they're fetched before the loop, so `add_finding` can tell the model when a line isn't in the diff. If listing the files fails, all findings go into the body.
 
 ### Phase 7 — Allowlisted HTTP access *(optional, after Phase 5)*
 

@@ -116,6 +116,8 @@ async function handleMessage(core, { messages, message, turn, toolsByName, maxTo
 // parsed arguments and returns a string. Tool errors are reported back to the model instead of being thrown.
 // Progress (turns, tool calls, token usage) is logged with `core.info`; details (tool output, raw model responses)
 // with `core.debug`.
+// If nothing is submitted after the turn limit, it returns `report: undefined` and the caller decides how to proceed
+// (e.g. post the findings staged so far).
 async function runAgent(core, {
   endpoint,
   apiKey,
@@ -166,7 +168,8 @@ async function runAgent(core, {
     const report = await handleMessage(core, { messages, message: response.message, turn, toolsByName, maxToolOutputBytes });
     if (report !== undefined) return { report, turns: turn, model: currentModel, usage };
   }
-  throw new Error(`no review was submitted within ${maxTurns} turns`);
+  core.warning(`ai-review: no review was submitted within ${maxTurns} turns; finishing without a report.`);
+  return { report: undefined, turns: maxTurns + 1, model: currentModel, usage };
 }
 
 module.exports = { runAgent, DEFAULT_MAX_TURNS };
