@@ -29,6 +29,7 @@ Runs the [`review-pr`](https://github.com/safe-research/agents/tree/main/skills/
 3. The model explores the checkout with read-only tools until it calls `submit_review` with its Markdown report: `read_file`, `list_files`, `grep` (`git grep`), and `git` (only `diff`, `log`, `show`, `merge-base`, `rev-parse`, `cat-file -e`, `ls-files`, `status`). Paths are confined to the two checkouts; there is no shell, no network access unless [`fetch-allowlist`](#network-access) is set, and the tools never see `github-token`. After `max-turns` turns the model is asked to submit what it has.
 4. The report is posted as a `COMMENT` review under a `## <title>` heading. The `<file hash>` placeholders in its "Files changed" links are filled in with the SHA-256 of the linked path.
 5. While reviewing, the model stages each verified finding with `add_finding` (and can take it back with `remove_finding`); each result shows the staged findings and whether they will be posted inline. The findings are numbered by priority: those on lines shown in the PR diff are posted as inline comments of the same review, the others are added to the review body under their priority section with a link to the file. If GitHub rejects the inline comments, they're appended to the review body instead. If the model doesn't submit a report within the turn limit, the staged findings are still posted.
+6. Before posting, each staged finding is checked with `check-model` in a separate, minimal request (no tools, no review context; only the finding's title, location and text). Findings that don't describe a concrete problem or don't propose a fix, such as a "finding" confirming that the change is correct, are dropped and logged with the reason. If a check fails or gives no clear answer, the finding is kept.
 
 If a model request fails, it is retried with `fallback-model`, and the rest of the review continues on that model. The turn count and token usage are written to the job summary.
 
@@ -40,6 +41,7 @@ The log shows the progress: each step, and for every turn the model, the token u
 | `endpoint` | no | `https://generativelanguage.googleapis.com/v1beta/openai/` | Base URL of the API; `/chat/completions` is appended. Must support tool calling |
 | `model` | no | `gemini-3.6-flash` | Model used for the review |
 | `fallback-model` | no | `gemini-3.5-flash-lite` | Model to continue with on error; set empty to disable |
+| `check-model` | no | `gemini-3.5-flash-lite` | Model that checks each staged finding before posting; a small model is enough (very small ones, around 1B, drop valid findings too). Set empty to disable |
 | `github-token` | no | `${{ github.token }}` | Token used to check out and read the PR and post the review |
 | `pr-number` | no | `${{ github.event.pull_request.number }}` | PR to review |
 | `title` | no | `AI Code Review` | Heading of the posted review (useful with multiple reviewers) |
@@ -115,7 +117,7 @@ MODEL=gemini-3.6-flash FALLBACK_MODEL=gemini-3.5-flash-lite \
 node ai-review/local-test.js
 ```
 
-`SKILL`, `MAX_TURNS`, `FETCH_ALLOWLIST` and `FETCH_BLOCKLIST` are read from the environment as well. `DEBUG=1` also prints the details: the system prompt, the full output of every tool call, and the raw model responses. Set `GITHUB_TOKEN` to avoid GitHub's unauthenticated rate limit.
+`SKILL`, `MAX_TURNS`, `CHECK_MODEL`, `FETCH_ALLOWLIST` and `FETCH_BLOCKLIST` are read from the environment as well; without `CHECK_MODEL`, the findings aren't checked. `DEBUG=1` also prints the details: the system prompt, the full output of every tool call, and the raw model responses. Set `GITHUB_TOKEN` to avoid GitHub's unauthenticated rate limit.
 
 Instead of passing the variables on the command line, you can put them in a `.env` file (one `KEY=value` per line) in the directory you run the script from; it's ignored by git. Variables set in the shell take precedence over the file:
 

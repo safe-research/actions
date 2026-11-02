@@ -188,4 +188,5 @@ module.exports = {
   buildSkillIndex,
   buildSystemPrompt,
   buildUserPrompt,
+  fence,
 };
