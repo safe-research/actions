@@ -28,6 +28,7 @@ Runs the [`review-pr`](https://github.com/safe-research/agents/tree/main/skills/
 2. The system prompt is assembled from an environment preamble (PR metadata, how the skill's shell commands map to the tools), the body of `skill`, and an index of the other skills, which the model can read on demand.
 3. The model explores the checkout with read-only tools until it calls `submit_review` with its Markdown report: `read_file`, `list_files`, `grep` (`git grep`), and `git` (only `diff`, `log`, `show`, `merge-base`, `rev-parse`, `cat-file -e`, `ls-files`, `status`). Paths are confined to the two checkouts; there is no shell and no network access, and the tools never see `github-token`. After `max-turns` turns the model is asked to submit what it has.
 4. The report is posted as a `COMMENT` review under a `## <title>` heading. The `<file hash>` placeholders in its "Files changed" links are filled in with the SHA-256 of the linked path.
+5. While reviewing, the model stages each verified finding with `add_finding` (and can take it back with `remove_finding`); each result shows the staged findings and whether they will be posted inline. The findings are numbered by priority: those on lines shown in the PR diff are posted as inline comments of the same review, the others are added to the review body under their priority section with a link to the file. If GitHub rejects the inline comments, they're appended to the review body instead. If the model doesn't submit a report within the turn limit, the staged findings are still posted.
 
 If a model request fails, it is retried with `fallback-model`, and the rest of the review continues on that model. The turn count and token usage are written to the job summary.
 
@@ -76,7 +77,7 @@ For Gemini, get an API key from [Google AI Studio](https://aistudio.google.com/a
 
 #### Local testing
 
-`local-test.js` runs the review against a real PR but prints the review and job summary instead of posting them. It needs a local checkout of the PR head (with the base commit available) and of `safe-research/agents`:
+`local-test.js` runs the review against a real PR but prints the review (including inline comments) and job summary instead of posting them. It needs a local checkout of the PR head (with the base commit available) and of `safe-research/agents`:
 
 ```sh
 git -C ../repo fetch origin pull/123/head && git -C ../repo checkout FETCH_HEAD

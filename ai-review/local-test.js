@@ -56,6 +56,10 @@ const github = {
         const res = await ghRequest(`/repos/${owner}/${repo}/pulls/${pull_number}`);
         return { data: await res.json() };
       },
+      listFiles: async ({ owner, repo, pull_number, per_page, page }) => {
+        const res = await ghRequest(`/repos/${owner}/${repo}/pulls/${pull_number}/files?per_page=${per_page}&page=${page}`);
+        return { data: await res.json() };
+      },
       createReview: async (params) => {
         console.log("\n===== DRY RUN: would post this review =====");
         console.log(`event: ${params.event}`);
