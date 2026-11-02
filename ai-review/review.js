@@ -1,4 +1,5 @@
 const { runAgent, DEFAULT_MAX_TURNS } = require("./agent.js");
+const { checkFindings } = require("./check.js");
 const { createFetchTool, parseHostList } = require("./fetch.js");
 const { createFindingTools, renderReview } = require("./findings.js");
 const { fetchPullRequest, fillDiffAnchors, fetchCommentableLines, postReview } = require("./github.js");
@@ -19,6 +20,8 @@ module.exports = async ({ github, context, core }) => {
   const endpoint = process.env.API_ENDPOINT;
   const model = process.env.MODEL;
   const fallbackModel = process.env.FALLBACK_MODEL;
+  // Empty disables the check of the staged findings.
+  const checkModel = process.env.CHECK_MODEL;
   const title = process.env.TITLE || "AI Code Review";
   const prNumber = parseInt(process.env.PR_NUMBER);
   const repoPath = process.env.REPO_PATH;
@@ -84,18 +87,27 @@ module.exports = async ({ github, context, core }) => {
     maxTurns,
   });
   core.info(`ai-review: review finished by "${result.model}" after ${result.turns} turns (${result.usage.total_tokens} tokens).`);
+  const usageRows = [[result.model, String(result.turns), result.usage]];
+
+  let findings = findingTools.findings();
+  if (result.report === undefined && findings.length === 0) {
+    throw new Error(`no review was submitted within ${maxTurns} turns and no findings were staged`);
+  }
+  if (checkModel && findings.length > 0) {
+    core.info(`ai-review: checking ${findings.length} finding(s) with "${checkModel}"`);
+    const check = await checkFindings(core, { endpoint, apiKey, model: checkModel, findings });
+    findings = check.findings;
+    core.info(`ai-review: kept ${findings.length} finding(s), dropped ${check.dropped.length} (${check.usage.total_tokens} tokens).`);
+    usageRows.push([`${checkModel} (finding check)`, "-", check.usage]);
+  }
   await core.summary
     .addHeading(title, 3)
     .addTable([
       [{ data: "Model", header: true }, { data: "Turns", header: true }, { data: "Prompt tokens", header: true }, { data: "Completion tokens", header: true }, { data: "Total tokens", header: true }],
-      [result.model, String(result.turns), String(result.usage.prompt_tokens), String(result.usage.completion_tokens), String(result.usage.total_tokens)],
+      ...usageRows.map(([name, turns, usage]) => [name, turns, String(usage.prompt_tokens), String(usage.completion_tokens), String(usage.total_tokens)]),
     ])
     .write();
 
-  const findings = findingTools.findings();
-  if (result.report === undefined && findings.length === 0) {
-    throw new Error(`no review was submitted within ${maxTurns} turns and no findings were staged`);
-  }
   const review = renderReview({
     report: result.report ?? UNFINISHED_REPORT,
     findings,
