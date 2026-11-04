@@ -169,6 +169,13 @@ describe("tools", () => {
       }
     });
 
+    it("lists the rejected options in the description and in errors", () => {
+      const { description } = tools.find((tool) => tool.name === "git");
+      const listed = "-c, -C, -O, --output, --no-index, --ext-diff, --textconv, --orderfile, --git-dir, --work-tree, --exec-path, --config-env";
+      assert.ok(description.includes(listed));
+      assert.throws(() => validateGitArgs(["diff", "--no-index", "a", "b"]), (err) => err.message.startsWith('git option "--no-index" is not allowed; rejected options: ') && err.message.includes(listed));
+    });
+
     it("disables external diff and textconv for diff-like commands", () => {
       assert.deepEqual(validateGitArgs(["diff", "HEAD"]), ["diff", "--no-ext-diff", "--no-textconv", "HEAD"]);
       assert.deepEqual(validateGitArgs(["log", "--output-indicator-new=+"]), ["log", "--no-ext-diff", "--no-textconv", "--output-indicator-new=+"]);
