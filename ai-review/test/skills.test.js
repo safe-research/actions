@@ -143,6 +143,7 @@ describe("prompt assembly", () => {
       `\`feat/x\` at \`${"b".repeat(40)}\``,
       "checked out at `/work/pr`",
       "You have no shell",
+      "call several tools in one turn when the calls don't depend on each other's results",
       "call `submit_review` exactly once",
       "Stage each finding with `add_finding` once it has survived verification",
       "`remove_finding`",
