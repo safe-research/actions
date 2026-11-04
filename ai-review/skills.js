@@ -140,7 +140,7 @@ ${fence(`${pr.title}\n\n${pr.body || "(no description provided)"}`)}
 
 ## Tools
 
-You have no shell; use the provided tools instead. Where the instructions run a shell command, use the matching tool: \`git\` for git commands, \`grep\` instead of \`grep\`/\`rg\`, \`read_file\` instead of \`cat\`, and \`list_files\` instead of \`ls\`/\`find\`.
+You have no shell; use the provided tools instead. Where the instructions run a shell command, use the matching tool: \`git\` for git commands, \`grep\` instead of \`grep\`/\`rg\`, \`read_file\` instead of \`cat\`, and \`list_files\` instead of \`ls\`/\`find\`. The number of turns is limited, so call several tools in one turn when the calls don't depend on each other's results, e.g. read the changed files and grep for their callers together.
 
 ${describeNetworkAccess(fetch)}
 
