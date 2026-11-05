@@ -3,23 +3,25 @@ const { truncate, MAX_OUTPUT_BYTES } = require("./tools.js");
 
 const DEFAULT_MAX_TURNS = 40;
 
-const SUBMIT_REVIEW_TOOL = {
+// The findings are staged with separate tools (see `findings.js`) and added to the review when it's posted, so this
+// only takes the summary.
+const FINALIZE_REVIEW_TOOL = {
   type: "function",
   function: {
-    name: "submit_review",
-    description: "Submit the final review report. This ends the review; call it exactly once when you are done.",
+    name: "finalize_review",
+    description: "Finalize the review with the findings staged so far. The staged findings are posted as they are, together with the summary. This ends the review; call it exactly once when you are done.",
     parameters: {
       type: "object",
       properties: {
-        report: { type: "string", description: "The complete review report in Markdown" },
+        summary: { type: "string", description: "Summary of the review in Markdown, without the findings: what the PR does, the overall verdict, and any context used or missing. Don't repeat the staged findings; they are added when the review is posted." },
       },
-      required: ["report"],
+      required: ["summary"],
     },
   },
 };
 
-const NO_TOOL_CALL_PROMPT = "Continue the review using the available tools, then call submit_review with the report.";
-const TURN_LIMIT_PROMPT = "The turn limit has been reached. Do not gather more context. Call submit_review now with your report based on what you have found so far.";
+const NO_TOOL_CALL_PROMPT = "Continue the review using the available tools, then call finalize_review with the summary.";
+const TURN_LIMIT_PROMPT = "The turn limit has been reached. Do not gather more context. Call finalize_review now with a summary based on what you have found so far.";
 
 function toToolDefinition({ name, description, parameters }) {
   return { type: "function", function: { name, description, parameters } };
@@ -63,12 +65,12 @@ async function runToolCall(call, toolsByName, maxToolOutputBytes) {
   }
 }
 
-// Returns the report if the call is a valid `submit_review`, otherwise an error message for the model.
-function readSubmission(call) {
+// Returns the summary if the call is a valid `finalize_review`, otherwise an error message for the model.
+function readSummary(call) {
   try {
-    const { report } = parseArguments(call.function.arguments);
-    if (typeof report !== "string" || report.trim() === "") return { error: "Error: report must be a non-empty string" };
-    return { report };
+    const { summary } = parseArguments(call.function.arguments);
+    if (typeof summary !== "string" || summary.trim() === "") return { error: "Error: summary must be a non-empty string" };
+    return { summary };
   } catch (err) {
     return { error: `Error: ${err.message}` };
   }
@@ -93,16 +95,16 @@ async function handleMessage(core, { messages, message, turn, toolsByName, maxTo
   }
   for (const [index, call] of calls.entries()) {
     let content;
-    if (call.function?.name === SUBMIT_REVIEW_TOOL.function.name) {
-      const { report, error } = readSubmission(call);
-      if (report !== undefined) {
-        core.info(`ai-review: turn ${turn}: review submitted (${Buffer.byteLength(report)} bytes)`);
-        // The prompt asks for submit_review as the last call; calls after it (e.g. a late add_finding) are lost.
+    if (call.function?.name === FINALIZE_REVIEW_TOOL.function.name) {
+      const { summary, error } = readSummary(call);
+      if (summary !== undefined) {
+        core.info(`ai-review: turn ${turn}: review finalized (summary ${Buffer.byteLength(summary)} bytes)`);
+        // The prompt asks for finalize_review as the last call; calls after it (e.g. a late add_finding) are lost.
         const skipped = calls.slice(index + 1).map((later) => later.function?.name);
         if (skipped.length > 0) {
-          core.warning(`ai-review: turn ${turn}: ${skipped.length} tool call(s) after submit_review were not run: ${skipped.join(", ")}`);
+          core.warning(`ai-review: turn ${turn}: ${skipped.length} tool call(s) after finalize_review were not run: ${skipped.join(", ")}`);
         }
-        return report;
+        return summary;
       }
       content = error;
     } else {
@@ -116,7 +118,8 @@ async function handleMessage(core, { messages, message, turn, toolsByName, maxTo
   return undefined;
 }
 
-// Runs a tool-calling loop until the model calls `submit_review` (or answers in plain text).
+// Runs a tool-calling loop until the model calls `finalize_review` (or answers in plain text). The returned `report`
+// is the summary from `finalize_review` (or the plain-text answer).
 // `tools` are `{ name, description, parameters, run }` objects as returned by `createTools`; `run` receives the
 // parsed arguments and returns a string. Tool errors are reported back to the model instead of being thrown.
 // Progress (turns, tool calls, token usage) is logged with `core.info`; details (tool output, raw model responses)
@@ -135,10 +138,10 @@ async function runAgent(core, {
   maxToolOutputBytes = MAX_OUTPUT_BYTES,
 }) {
   const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
-  if (toolsByName.has(SUBMIT_REVIEW_TOOL.function.name)) {
-    throw new Error(`tool name "${SUBMIT_REVIEW_TOOL.function.name}" is reserved`);
+  if (toolsByName.has(FINALIZE_REVIEW_TOOL.function.name)) {
+    throw new Error(`tool name "${FINALIZE_REVIEW_TOOL.function.name}" is reserved`);
   }
-  const toolDefinitions = [...tools.map(toToolDefinition), SUBMIT_REVIEW_TOOL];
+  const toolDefinitions = [...tools.map(toToolDefinition), FINALIZE_REVIEW_TOOL];
   const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
@@ -150,7 +153,7 @@ async function runAgent(core, {
   for (let turn = 1; turn <= maxTurns + 1; turn++) {
     const isFinalTurn = turn > maxTurns;
     if (isFinalTurn) {
-      // Turn limit reached: ask once more, offering only `submit_review`.
+      // Turn limit reached: ask once more, offering only `finalize_review`.
       core.warning(`ai-review: reached the turn limit (${maxTurns}); asking the model to submit its report.`);
       messages.push({ role: "user", content: TURN_LIMIT_PROMPT });
     }
@@ -160,7 +163,7 @@ async function runAgent(core, {
       model: currentModel,
       fallbackModel,
       messages,
-      tools: isFinalTurn ? [SUBMIT_REVIEW_TOOL] : toolDefinitions,
+      tools: isFinalTurn ? [FINALIZE_REVIEW_TOOL] : toolDefinitions,
     });
     currentModel = response.model;
     addUsage(usage, response.usage);
