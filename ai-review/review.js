@@ -16,7 +16,13 @@ function parseMaxTurns(value) {
   return maxTurns > 0 ? maxTurns : DEFAULT_MAX_TURNS;
 }
 
-module.exports = async ({ github, context, core }) => {
+// e.g. "3m 07s"
+function formatDuration(ms) {
+  const seconds = Math.round(ms / 1000);
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+async function review({ github, context, core }) {
   const apiKey = process.env.API_KEY;
   const endpoint = process.env.API_ENDPOINT;
   const model = process.env.MODEL;
@@ -126,4 +132,14 @@ module.exports = async ({ github, context, core }) => {
   core.info(`ai-review: posting review (${Buffer.byteLength(body)} bytes, ${comments.length} inline comment(s))`);
   await postReview(github, core, { owner, repo, prNumber, body, comments });
   core.info("ai-review: review posted");
+}
+
+module.exports = async ({ github, context, core }) => {
+  const start = Date.now();
+  try {
+    await review({ github, context, core });
+  } finally {
+    // Also logged if the review fails, e.g. to see how long a run took before it hit an error.
+    core.info(`ai-review: finished after ${formatDuration(Date.now() - start)}`);
+  }
 };

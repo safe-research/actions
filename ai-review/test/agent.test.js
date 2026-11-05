@@ -87,7 +87,7 @@ describe("runAgent", () => {
   it("runs tool calls and returns the submitted report", async () => {
     fake.script(
       () => assistant({ toolCalls: [toolCall("c1", "read_file", { path: "a.js" }), toolCall("c2", "read_file", { path: "b.js" })] }),
-      () => assistant({ toolCalls: [toolCall("c3", "submit_review", { report: "## Findings\nNone." })] }),
+      () => assistant({ toolCalls: [toolCall("c3", "finalize_review", { summary: "## Findings\nNone." })] }),
     );
 
     const result = await run();
@@ -108,7 +108,7 @@ describe("runAgent", () => {
       { role: "system", content: "system" },
       { role: "user", content: "Review PR #1" },
     ]);
-    assert.deepEqual(first.body.tools.map((tool) => tool.function.name), ["read_file", "fail", "big", "submit_review"]);
+    assert.deepEqual(first.body.tools.map((tool) => tool.function.name), ["read_file", "fail", "big", "finalize_review"]);
     assert.deepEqual(first.body.tools[0], { type: "function", function: { name: "read_file", description: stubTools[0].description, parameters: stubTools[0].parameters } });
     assert.deepEqual(second.body.messages.slice(2), [
       assistant({ toolCalls: [toolCall("c1", "read_file", { path: "a.js" }), toolCall("c2", "read_file", { path: "b.js" })] }),
@@ -121,7 +121,7 @@ describe("runAgent", () => {
     const message = { ...assistant({ toolCalls: [toolCall("c1", "read_file", { path: "a.js" })] }), extra_content: { google: { thought_signature: "sig" } } };
     fake.script(
       () => message,
-      () => assistant({ toolCalls: [toolCall("c2", "submit_review", { report: "done" })] }),
+      () => assistant({ toolCalls: [toolCall("c2", "finalize_review", { summary: "done" })] }),
     );
 
     await run();
@@ -135,9 +135,9 @@ describe("runAgent", () => {
         toolCall("c1", "fail", {}),
         toolCall("c2", "rm_rf", {}),
         toolCall("c3", "read_file", "{not json"),
-        toolCall("c4", "submit_review", { report: "" }),
+        toolCall("c4", "finalize_review", { summary: "" }),
       ] }),
-      () => assistant({ toolCalls: [toolCall("c5", "submit_review", { report: "ok" })] }),
+      () => assistant({ toolCalls: [toolCall("c5", "finalize_review", { summary: "ok" })] }),
     );
 
     const { report } = await run();
@@ -147,15 +147,15 @@ describe("runAgent", () => {
     assert.equal(toolMessages[0].content, "Error: boom");
     assert.equal(toolMessages[1].content, 'Error: unknown tool "rm_rf"');
     assert.match(toolMessages[2].content, /^Error: .*JSON/);
-    assert.equal(toolMessages[3].content, "Error: report must be a non-empty string");
+    assert.equal(toolMessages[3].content, "Error: summary must be a non-empty string");
   });
 
-  it("runs the calls before submit_review in the same turn and warns about the ones after it", async () => {
+  it("runs the calls before finalize_review in the same turn and warns about the ones after it", async () => {
     fake.script(
       () => assistant({
         toolCalls: [
           toolCall("c1", "read_file", { path: "a.js" }),
-          toolCall("c2", "submit_review", { report: "ok" }),
+          toolCall("c2", "finalize_review", { summary: "ok" }),
           toolCall("c3", "read_file", { path: "late.js" }),
           toolCall("c4", "fail", {}),
         ],
@@ -169,13 +169,13 @@ describe("runAgent", () => {
 
     assert.equal(report, "ok");
     assert.deepEqual(toolRuns, ["a.js"]);
-    assert.deepEqual(warnings, ["ai-review: turn 1: 2 tool call(s) after submit_review were not run: read_file, fail"]);
+    assert.deepEqual(warnings, ["ai-review: turn 1: 2 tool call(s) after finalize_review were not run: read_file, fail"]);
   });
 
   it("caps tool output", async () => {
     fake.script(
       () => assistant({ toolCalls: [toolCall("c1", "big", {})] }),
-      () => assistant({ toolCalls: [toolCall("c2", "submit_review", { report: "ok" })] }),
+      () => assistant({ toolCalls: [toolCall("c2", "finalize_review", { summary: "ok" })] }),
     );
 
     await run({ maxToolOutputBytes: 100 });
@@ -200,7 +200,7 @@ describe("runAgent", () => {
   it("nudges the model when it answers with neither text nor tool calls", async () => {
     fake.script(
       () => assistant({ content: "  " }),
-      () => assistant({ toolCalls: [toolCall("c1", "submit_review", { report: "ok" })] }),
+      () => assistant({ toolCalls: [toolCall("c1", "finalize_review", { summary: "ok" })] }),
     );
 
     const { report } = await run();
@@ -209,12 +209,12 @@ describe("runAgent", () => {
     assert.equal(fake.requests[1].body.messages.at(-1).role, "user");
   });
 
-  it("asks once more with only submit_review after reaching the turn limit", async () => {
+  it("asks once more with only finalize_review after reaching the turn limit", async () => {
     const readAgain = () => assistant({ toolCalls: [toolCall("c", "read_file", { path: "a.js" })] });
     fake.script(
       readAgain,
       readAgain,
-      () => assistant({ toolCalls: [toolCall("c9", "submit_review", { report: "partial" })] }),
+      () => assistant({ toolCalls: [toolCall("c9", "finalize_review", { summary: "partial" })] }),
     );
 
     const { report, turns } = await run({ maxTurns: 2 });
@@ -222,7 +222,7 @@ describe("runAgent", () => {
     assert.equal(report, "partial");
     assert.equal(turns, 3);
     assert.equal(fake.requests.length, 3);
-    assert.deepEqual(fake.requests[2].body.tools.map((tool) => tool.function.name), ["submit_review"]);
+    assert.deepEqual(fake.requests[2].body.tools.map((tool) => tool.function.name), ["finalize_review"]);
     assert.match(fake.requests[2].body.messages.at(-1).content, /turn limit/);
   });
 
@@ -241,7 +241,7 @@ describe("runAgent", () => {
       () => assistant({ toolCalls: [toolCall("c1", "read_file", { path: "a.js" })] }),
       () => ({ status: 503, body: "overloaded" }),
       () => assistant({ toolCalls: [toolCall("c2", "read_file", { path: "b.js" })] }),
-      () => assistant({ toolCalls: [toolCall("c3", "submit_review", { report: "ok" })] }),
+      () => assistant({ toolCalls: [toolCall("c3", "finalize_review", { summary: "ok" })] }),
     );
 
     const result = await run({ fallbackModel: "fallback" });
@@ -272,7 +272,7 @@ describe("runAgent", () => {
   it("logs progress as info and only the details as debug", async () => {
     fake.script(
       () => assistant({ toolCalls: [toolCall("c1", "read_file", { path: "a.js" }), toolCall("c2", "fail", {})] }),
-      () => assistant({ toolCalls: [toolCall("c3", "submit_review", { report: "Done." })] }),
+      () => assistant({ toolCalls: [toolCall("c3", "finalize_review", { summary: "Done." })] }),
     );
     const logs = { info: [], debug: [] };
     const recordingCore = { info: (m) => logs.info.push(m), debug: (m) => logs.debug.push(m), warning() {} };
@@ -282,7 +282,7 @@ describe("runAgent", () => {
       'ai-review: turn 1: read_file({"path":"a.js"}) -> 16 bytes',
       "ai-review: turn 1: fail({}) -> Error: boom",
       "ai-review: turn 2/40 (primary): 1 tool call(s), 10 prompt + 5 completion tokens (30 total so far)",
-      "ai-review: turn 2: review submitted (5 bytes)",
+      "ai-review: turn 2: review finalized (summary 5 bytes)",
     ]);
     // Debug adds the raw responses and the full tool output; the one-line error is already complete in the info log.
     assert.equal(logs.debug.length, 3);
@@ -294,7 +294,7 @@ describe("runAgent", () => {
   it("truncates long tool arguments in the progress log", async () => {
     fake.script(
       () => assistant({ toolCalls: [toolCall("c1", "read_file", { path: "p".repeat(500) })] }),
-      () => assistant({ toolCalls: [toolCall("c2", "submit_review", { report: "Done." })] }),
+      () => assistant({ toolCalls: [toolCall("c2", "finalize_review", { summary: "Done." })] }),
     );
     const info = [];
     await runAgent({ ...core, info: (m) => info.push(m) }, { endpoint, apiKey: "k", model: "primary", systemPrompt: "s", userPrompt: "u", tools: stubTools });
@@ -302,7 +302,7 @@ describe("runAgent", () => {
     assert.equal(line, `ai-review: turn 1: read_file(${'{"path":"'}${"p".repeat(191)}…) -> ${Buffer.byteLength(`contents of ${"p".repeat(500)}`)} bytes`);
   });
 
-  it("rejects tools named submit_review", async () => {
-    await assert.rejects(run({ tools: [{ ...stubTools[0], name: "submit_review" }] }), /reserved/);
+  it("rejects tools named finalize_review", async () => {
+    await assert.rejects(run({ tools: [{ ...stubTools[0], name: "finalize_review" }] }), /reserved/);
   });
 });

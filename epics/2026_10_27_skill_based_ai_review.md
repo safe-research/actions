@@ -22,6 +22,7 @@ Steps (one PR each unless noted):
 7. **HTTP access (optional):** a `fetch_url` tool for any public host (or a configured list of hosts), minus a blocklist, so the skill's `curl` steps work.
 8. **Finding check (optional):** check each staged finding with a small model in an independent request and drop the ones that don't name a problem or propose a fix.
 8c. **Docs extraction (optional):** for large `fetch_url` responses, a small model picks the line ranges that answer the agent's question; the action copies those lines verbatim.
+8d. **Summary instead of report:** rename `submit_review(report)` to `finalize_review(summary)`, so the model doesn't repeat the findings or their priority sections in its text.
 9. **Cleanup:** remove this plan.
 
 ---
@@ -54,7 +55,7 @@ The skill's instructions are written for a shell (`curl`, `git`, `sha256sum`, `G
 
 - It gives the PR metadata (number, title, body, URL, base/head SHA, repository) directly. This replaces Step 1's API and event-file lookups, which also don't work for `workflow_dispatch` runs.
 - It maps the skill's shell commands to the tools (whose definitions are sent via the request's `tools` field) and says that network access and subagents are unavailable. The skill's parallel verification is already optional ("when subagents are available").
-- It asks for the final report via the `submit_review` tool.
+- It asks for the final report via the `submit_review` tool (`finalize_review` with a summary since Phase 8d).
 
 ### Secrets stay out of the agent
 
@@ -125,7 +126,7 @@ Consumer workflows don't change, apart from dropping `context-model` if they set
 | `git(args[])` | Allowlist: `diff`, `log`, `show`, `merge-base`, `rev-parse`, `cat-file -e`, `ls-files`, `status`. Always passes `--no-ext-diff --no-textconv` where they apply, and rejects `-c`, `--output`, and `-C`. Runs with `GIT_CONFIG_NOSYSTEM=1` and an empty `HOME`, so repo or global config can't trigger helpers. |
 | `fetch_url(url, raw?, question?)` | *Optional, Phase 7; `question` since Phase 8c.* Unauthenticated HTTPS GET of a URL whose host is allowed by `fetch-allowlist`, not blocked, and resolves to public addresses only; the response is returned as text. Only offered when the input is set. |
 | `add_finding(path, line, priority, title, body)`, `remove_finding(id)` | *Phase 6.* Stage or remove a finding; the result lists the staged findings and where each will be posted. |
-| `submit_review(report)` | Ends the loop and returns the Markdown report (without the findings since Phase 6). |
+| `submit_review(report)` | Ends the loop and returns the Markdown report (without the findings since Phase 6). Renamed to `finalize_review(summary)` in Phase 8d. |
 
 All paths are resolved with `realpath` and must stay inside `REPO_PATH` or `SKILLS_PATH`. Symlinks that point outside are rejected.
 
@@ -240,6 +241,14 @@ With the self-hosted models (Qwen3-Coder-30B-A3B for the review, Gemma 4 E4B for
 - Tests (`test/extract.test.js`): range parsing (lenient: Markdown, spaces, single lines, out-of-range and reversed ranges), chunking at line boundaries, padding and merging, JSON pretty-printing, the cap, and against a fake endpoint: one request per chunk, `NONE`, failing open. `test/fetch.test.js`: the threshold and the cache.
 
 The same selector is meant to be reused later for large outputs of the other tools (`grep`, `git log`, `git diff`, `read_file` of large files), where verbatim lines matter even more.
+
+### Phase 8d — Ask for a summary instead of the report *(after Phase 8)*
+
+The model kept writing the skill's report format into `submit_review`, including the findings or, without findings, the empty "🔴 Blocking", "🟠 Should fix" and "🟡 Consider" headings. Findings dropped by the check were then still posted, and reviews without findings ended with empty sections. This change was meant to be part of Phase 8 but got lost.
+
+- `submit_review(report)` is renamed to `finalize_review(summary)`, described as finalizing the review with the staged findings and taking only a summary without them. With "submit the final review report" / "the complete review report", models wrote the findings into the report as well (following the skill's report format), so a finding dropped by the check was still posted. The preamble asks for the summary in the same terms.
+- The job log also shows how long the review took ("finished after 3m 07s"), even if the review fails.
+- `test/agent.test.js` and `test/skills.test.js` use the new tool name and wording.
 
 ### Phase 9 — Remove this plan
 
