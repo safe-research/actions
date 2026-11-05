@@ -1,5 +1,6 @@
 const { runAgent, DEFAULT_MAX_TURNS } = require("./agent.js");
 const { checkFindings } = require("./check.js");
+const { createExtractor } = require("./extract.js");
 const { createFetchTool, parseHostList } = require("./fetch.js");
 const { createFindingTools, renderReview } = require("./findings.js");
 const { fetchPullRequest, fillDiffAnchors, fetchCommentableLines, postReview } = require("./github.js");
@@ -20,8 +21,9 @@ module.exports = async ({ github, context, core }) => {
   const endpoint = process.env.API_ENDPOINT;
   const model = process.env.MODEL;
   const fallbackModel = process.env.FALLBACK_MODEL;
-  // Empty disables the check of the staged findings.
-  const checkModel = process.env.CHECK_MODEL;
+  // Small model for support tasks: checking the staged findings and extracting the relevant lines from large
+  // `fetch_url` responses. Empty disables both.
+  const supportModel = process.env.SUPPORT_MODEL;
   const title = process.env.TITLE || "AI Code Review";
   const prNumber = parseInt(process.env.PR_NUMBER);
   const repoPath = process.env.REPO_PATH;
@@ -30,7 +32,8 @@ module.exports = async ({ github, context, core }) => {
   const maxTurns = parseMaxTurns(process.env.MAX_TURNS);
   // An empty allowlist disables `fetch_url`, so the agent has no network access.
   const allowedHosts = parseHostList(process.env.FETCH_ALLOWLIST);
-  const fetch = allowedHosts.length > 0 ? { allowedHosts, blockedHosts: parseHostList(process.env.FETCH_BLOCKLIST) } : undefined;
+  const extractor = allowedHosts.length > 0 && supportModel ? createExtractor(core, { endpoint, apiKey, model: supportModel }) : undefined;
+  const fetch = allowedHosts.length > 0 ? { allowedHosts, blockedHosts: parseHostList(process.env.FETCH_BLOCKLIST), extract: extractor?.extract } : undefined;
   const { owner, repo } = context.repo;
 
   if (!prNumber) {
@@ -73,7 +76,7 @@ module.exports = async ({ github, context, core }) => {
   const findingTools = createFindingTools({ repoPath, commentable });
   const tools = [...createTools({ repoPath, skillsPath }), ...findingTools.tools];
   if (fetch) {
-    core.info(`ai-review: fetch_url enabled for ${allowedHosts.join(", ")}; blocked: ${fetch.blockedHosts.join(", ") || "none"}`);
+    core.info(`ai-review: fetch_url enabled for ${allowedHosts.join(", ")}; blocked: ${fetch.blockedHosts.join(", ") || "none"}; extraction: ${extractor ? `"${supportModel}"` : "off"}`);
     tools.push(createFetchTool({ ...fetch, onRequest: (message) => core.info(`ai-review: fetch_url: ${message}`) }));
   }
   const result = await runAgent(core, {
@@ -88,17 +91,18 @@ module.exports = async ({ github, context, core }) => {
   });
   core.info(`ai-review: review finished by "${result.model}" after ${result.turns} turns (${result.usage.total_tokens} tokens).`);
   const usageRows = [[result.model, String(result.turns), result.usage]];
+  if (extractor && extractor.usage.total_tokens > 0) usageRows.push([`${supportModel} (fetch extraction)`, "-", extractor.usage]);
 
   let findings = findingTools.findings();
   if (result.report === undefined && findings.length === 0) {
     throw new Error(`no review was submitted within ${maxTurns} turns and no findings were staged`);
   }
-  if (checkModel && findings.length > 0) {
-    core.info(`ai-review: checking ${findings.length} finding(s) with "${checkModel}"`);
-    const check = await checkFindings(core, { endpoint, apiKey, model: checkModel, findings });
+  if (supportModel && findings.length > 0) {
+    core.info(`ai-review: checking ${findings.length} finding(s) with "${supportModel}"`);
+    const check = await checkFindings(core, { endpoint, apiKey, model: supportModel, findings });
     findings = check.findings;
     core.info(`ai-review: kept ${findings.length} finding(s), dropped ${check.dropped.length} (${check.usage.total_tokens} tokens).`);
-    usageRows.push([`${checkModel} (finding check)`, "-", check.usage]);
+    usageRows.push([`${supportModel} (finding check)`, "-", check.usage]);
   }
   await core.summary
     .addHeading(title, 3)

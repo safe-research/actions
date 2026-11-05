@@ -2,6 +2,7 @@ const dns = require("node:dns");
 const https = require("node:https");
 const net = require("node:net");
 
+const { EXTRACT_THRESHOLD_BYTES } = require("./extract.js");
 const { truncate, MAX_OUTPUT_BYTES } = require("./tools.js");
 
 const FETCH_TIMEOUT_MS = 15_000;
@@ -126,11 +127,15 @@ function decodeEntities(text) {
   });
 }
 
-// Reduces an HTML page to its text, so that documentation fits the output cap: drops comments, scripts, styles and
-// the `<head>`, turns block elements into line breaks, removes the remaining tags and collapses whitespace and blank
-// lines. Whitespace in `<pre>` blocks is kept, so code keeps its indentation.
+// Reduces an HTML page to its text, so that documentation fits the output cap: drops comments, scripts, styles, the
+// `<head>` and the site navigation and footer (`<nav>`, `<footer>`), turns block elements into line breaks, removes
+// the remaining tags and collapses whitespace and blank lines. Whitespace in `<pre>` blocks is kept, so code keeps its
+// indentation. A script or style left open at the end (a response cut at the size limit) is dropped as well.
 function htmlToText(html) {
-  const stripped = html.replace(/<!--[\s\S]*?-->/g, "").replace(/<(head|script|style|noscript|template|svg)\b[\s\S]*?<\/\1\s*>/gi, "");
+  const stripped = html
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<(head|script|style|noscript|template|svg|nav|footer)\b[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<(script|style)\b(?![\s\S]*<\/\1\s*>)[\s\S]*$/i, "");
   // With a capturing group, `split` alternates between text outside (even indices) and inside (odd) `<pre>` blocks.
   const text = stripped
     .split(/(<pre\b[^>]*>[\s\S]*?<\/pre\s*>)/i)
@@ -205,11 +210,15 @@ function get(url, { transport, lookup, signal, maxResponseBytes }) {
 
 // Creates the `fetch_url` tool. `allowedHosts` are exact hostnames or `*` for any public hostname; `blockedHosts` are
 // domains that are blocked with all their subdomains. `onRequest(message)` is called for every request (including
-// redirects), so the job log shows what the agent fetched. `transport` and `isAllowedAddress` are only replaced in tests.
+// redirects), so the job log shows what the agent fetched. With `extract` (see `extract.js`), the tool takes a
+// `question`, and larger responses are reduced to the lines that answer it; if `extract` returns `undefined`, the text
+// is returned from the start as without a question. `transport` and `isAllowedAddress` are only replaced in tests.
 function createFetchTool({
   allowedHosts,
   blockedHosts = [],
   onRequest = () => {},
+  extract,
+  extractThresholdBytes = EXTRACT_THRESHOLD_BYTES,
   maxOutputBytes = MAX_OUTPUT_BYTES,
   maxResponseBytes = MAX_RESPONSE_BYTES,
   timeoutMs = FETCH_TIMEOUT_MS,
@@ -219,9 +228,11 @@ function createFetchTool({
   if (allowedHosts.length === 0) throw new Error("allowedHosts must not be empty");
   const policy = { allowedHosts, blockedHosts };
   const lookup = publicOnlyLookup(transport.lookup, isAllowedAddress);
+  // Successful responses by requested URL, so asking another question about a page doesn't download it again.
+  const cache = new Map();
 
-  async function fetchUrl({ url, raw = false }) {
-    if (typeof url !== "string") throw new Error("url must be a string");
+  // Follows redirects and returns the final URL and response; throws for HTTP errors.
+  async function load(url) {
     const signal = AbortSignal.timeout(timeoutMs);
     let current = checkUrl(url, policy);
     for (let redirects = 0; ; redirects++) {
@@ -240,36 +251,57 @@ function createFetchTool({
         current = checkUrl(new URL(location, current).href, policy);
         continue;
       }
-      const contentType = response.headers["content-type"] || "";
-      let text = decodeText(response.body, contentType);
-      if (!raw && /^\s*(text\/html|application\/xhtml\+xml)/i.test(contentType)) text = htmlToText(text);
-      const header = [
-        `URL: ${current.href}`,
-        `Status: ${response.status}`,
-        `Content-Type: ${contentType || "(none)"}`,
-        ...(response.truncated ? [`Note: only the first ${maxResponseBytes} bytes of the response were read`] : []),
-      ].join("\n");
-      const output = `${header}\n\n${text}`;
-      if (response.status >= 400) throw new Error(truncate(`HTTP ${response.status}\n${output}`, 2048));
-      return truncate(output, maxOutputBytes);
+      return { url: current, response };
     }
+  }
+
+  async function fetchUrl({ url, raw = false, question }) {
+    if (typeof url !== "string") throw new Error("url must be a string");
+    if (question !== undefined && typeof question !== "string") throw new Error("question must be a string");
+    let loaded = cache.get(url);
+    if (loaded) onRequest(`GET ${url} -> cached`);
+    else loaded = await load(url);
+    const { url: current, response } = loaded;
+    const contentType = response.headers["content-type"] || "";
+    let text = decodeText(response.body, contentType);
+    if (!raw && /^\s*(text\/html|application\/xhtml\+xml)/i.test(contentType)) text = htmlToText(text);
+    const header = [
+      `URL: ${current.href}`,
+      `Status: ${response.status}`,
+      `Content-Type: ${contentType || "(none)"}`,
+      ...(response.truncated ? [`Note: only the first ${maxResponseBytes} bytes of the response were read`] : []),
+    ].join("\n");
+    if (response.status >= 400) throw new Error(truncate(`HTTP ${response.status}\n${header}\n\n${text}`, 2048));
+    cache.set(url, loaded);
+    // Raw HTML is mostly markup, so it's only returned from the start.
+    if (extract && !raw && question?.trim() && Buffer.byteLength(text) > extractThresholdBytes) {
+      const extracted = await extract({ text, contentType, question: question.trim(), url: current.href });
+      if (extracted !== undefined) return `${header}\n\n${extracted}`;
+    }
+    return truncate(`${header}\n\n${text}`, maxOutputBytes);
   }
 
   const scope = allowedHosts.includes(ANY_HOST) ? "any public host" : `these hosts: ${allowedHosts.join(", ")}`;
   const blocked = blockedHosts.length > 0 ? ` Blocked domains (including subdomains): ${blockedHosts.join(", ")}.` : "";
+  const properties = {
+    url: { type: "string", description: "https URL to fetch" },
+    raw: { type: "boolean", description: "Return the HTML source instead of the extracted text (default false)" },
+  };
+  if (extract) {
+    properties.question = {
+      type: "string",
+      description:
+        `What you want to know from the response, e.g. "parameters and default of the timeout option". If the response is larger than ${extractThresholdBytes} bytes (and raw isn't set), ` +
+        `only the lines that answer it are returned (verbatim, with line numbers), selected by a smaller model. Omit it to get the response from the start, cut at ${maxOutputBytes} bytes.`,
+    };
+  }
   return {
     name: "fetch_url",
     description:
       `HTTPS GET request to ${scope}, unauthenticated. Hostnames only (no IP addresses, no ports), and only hosts that resolve to public addresses.${blocked} ` +
-      `Redirects are followed. The response is always returned as text, with a header giving the final URL, status and content type; HTML pages are converted to plain text unless raw is true.`,
-    parameters: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "https URL to fetch" },
-        raw: { type: "boolean", description: "Return the HTML source instead of the extracted text (default false)" },
-      },
-      required: ["url"],
-    },
+      `Redirects are followed. The response is always returned as text, with a header giving the final URL, status and content type; HTML pages are converted to plain text unless raw is true.` +
+      (extract ? " Pass a question for documentation pages and large API responses, so you get the relevant lines instead of the start of the page." : ""),
+    parameters: { type: "object", properties, required: ["url"] },
     run: fetchUrl,
   };
 }
