@@ -177,6 +177,13 @@ describe("prompt assembly", () => {
     assert.ok(!preamble.includes("no network access"));
   });
 
+  it("asks for a question only when fetch_url extracts", () => {
+    const fetch = { allowedHosts: ["*"], blockedHosts: [] };
+    assert.ok(!buildEnvironmentPreamble({ ...preambleArgs, fetch }).includes("question"));
+    const preamble = buildEnvironmentPreamble({ ...preambleArgs, fetch: { ...fetch, extract: async () => "" } });
+    assert.ok(preamble.includes("Pass a `question` with what you need from a documentation page or a large API response"));
+  });
+
   it("lists the allowed hosts without examples for an explicit allowlist", () => {
     const preamble = buildEnvironmentPreamble({ ...preambleArgs, fetch: { allowedHosts: ["docs.rs", "crates.io"], blockedHosts: [] } });
     assert.ok(preamble.includes("to only these hosts: `docs.rs`, `crates.io`."));

@@ -138,7 +138,13 @@ describe("htmlToText", () => {
 <pre><code>fn main() {
     run();
 }</code></pre></body></html>`;
-    assert.equal(htmlToText(html), "Home\n\nStruct Foo\n\nUses <T> &amp; more 😀 A\n\nfn main() {\n    run();\n}");
+    assert.equal(htmlToText(html), "Struct Foo\n\nUses <T> &amp; more 😀 A\n\nfn main() {\n    run();\n}");
+  });
+
+  it("drops the site navigation and footer, and a script cut off at the end", () => {
+    const html = `<body><header><h1>Title</h1></header><nav><ul><li>Menu</li></ul></nav><main>Content</main><aside>Note</aside><footer>© Site</footer>
+<script>one()</script><p>More</p><script>let cut = "`;
+    assert.equal(htmlToText(html), "Title\n\nContent\n\nNote\n\nMore");
   });
 
   it("keeps unknown entities", () => {
@@ -266,6 +272,48 @@ describe("fetch_url", () => {
     assert.match(result, /Note: only the first 1000 bytes of the response were read\n\nx{1000}$/);
     const capped = await createTool({ maxOutputBytes: 300 }).run({ url: "https://docs.example/big" });
     assert.match(capped, /\[output truncated: exceeded 300 bytes\]$/);
+  });
+
+  it("offers question only with an extractor", () => {
+    assert.equal(createTool().tool.parameters.properties.question, undefined);
+    const { tool } = createTool({ extract: async () => "" });
+    assert.match(tool.parameters.properties.question.description, /larger than 8192 bytes \(and raw isn.t set\), only the lines that answer it are returned/);
+    assert.match(tool.description, /Pass a question for documentation pages/);
+  });
+
+  it("extracts large responses when asked a question", async () => {
+    const calls = [];
+    const extract = async (input) => (calls.push(input), "Extract: lines 1-2");
+    const { run } = createTool({ extract, extractThresholdBytes: 5000 });
+    assert.equal(await run({ url: "https://docs.example/big", question: " what is x? " }), "URL: https://docs.example/big\nStatus: 200\nContent-Type: text/plain\n\nExtract: lines 1-2");
+    assert.deepEqual(calls, [{ text: "x".repeat(10_000), contentType: "text/plain", question: "what is x?", url: "https://docs.example/big" }]);
+    // Small responses and requests without a question are returned as they are.
+    assert.match(await run({ url: "https://docs.example/text", question: "q" }), /\n\nhello /);
+    assert.match(await run({ url: "https://docs.example/big", question: " " }), /\n\nx{10000}$/);
+    assert.match(await run({ url: "https://docs.example/big" }), /\n\nx{10000}$/);
+    assert.equal(calls.length, 1);
+    // Raw HTML isn't extracted.
+    const { run: runHtml } = createTool({ extract, extractThresholdBytes: 10 });
+    assert.match(await runHtml({ url: "https://docs.example/html", question: "q", raw: true }), /\n\n<html>/);
+    assert.equal(calls.length, 1);
+    await assert.rejects(run({ url: "https://docs.example/big", question: 42 }), /question must be a string/);
+  });
+
+  it("returns the text from the start if the extraction fails", async () => {
+    const { run } = createTool({ extract: async () => undefined, extractThresholdBytes: 5000, maxOutputBytes: 300 });
+    assert.match(await run({ url: "https://docs.example/big", question: "q" }), /^URL: https:\/\/docs.example\/big\n[\s\S]*\nx+\n\[output truncated: exceeded 300 bytes\]$/);
+  });
+
+  it("caches successful responses for the run", async () => {
+    const { run, log } = createTool();
+    const count = requests.length;
+    const first = await run({ url: "https://docs.example/redirect" });
+    assert.equal(await run({ url: "https://docs.example/redirect" }), first);
+    assert.equal(requests.length, count + 2);
+    assert.deepEqual(log, ["GET https://docs.example/redirect -> 302", "GET https://docs.example/text -> 200", "GET https://docs.example/redirect -> cached"]);
+    await assert.rejects(run({ url: "https://docs.example/missing" }), /HTTP 404/);
+    await assert.rejects(run({ url: "https://docs.example/missing" }), /HTTP 404/);
+    assert.equal(requests.length, count + 4);
   });
 
   it("times out", async () => {

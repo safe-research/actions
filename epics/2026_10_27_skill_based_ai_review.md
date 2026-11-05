@@ -21,6 +21,7 @@ Steps (one PR each unless noted):
 6. **Inline comments (optional):** have `submit_review` return structured findings and post them as inline comments.
 7. **HTTP access (optional):** a `fetch_url` tool for any public host (or a configured list of hosts), minus a blocklist, so the skill's `curl` steps work.
 8. **Finding check (optional):** check each staged finding with a small model in an independent request and drop the ones that don't name a problem or propose a fix.
+8c. **Docs extraction (optional):** for large `fetch_url` responses, a small model picks the line ranges that answer the agent's question; the action copies those lines verbatim.
 9. **Cleanup:** remove this plan.
 
 ---
@@ -88,6 +89,7 @@ ai-review/
   findings.js      # finding staging tools + review rendering (Phase 6)
   fetch.js         # fetch_url tool (Phase 7)
   check.js         # finding check (Phase 8)
+  extract.js       # line extraction for fetch_url (Phase 8c)
   local-test.js    # + local checkout / skills dir support
   test/*.test.js   # node:test, run with `node --test 'ai-review/test/*.test.js'`
 ```
@@ -101,7 +103,7 @@ ai-review/
 | `max-turns` | **new** | Agent loop limit, default `40` |
 | `fetch-allowlist` | **new** (Phase 7, optional) | Hosts the agent may fetch from (comma- or newline-separated), or `*` for any public host; empty (default) disables network access |
 | `fetch-blocklist` | **new** (Phase 7, optional) | Domains (with their subdomains) the agent may never fetch from, e.g. the tailnet |
-| `check-model` | **new** (Phase 8, optional) | Model that checks each staged finding before posting; empty disables the check |
+| `support-model` | **new** (Phase 8, optional; named `check-model` until Phase 8c) | Smaller model that checks each staged finding before posting and, since Phase 8c, extracts the relevant lines of large `fetch_url` responses; empty disables both |
 | `context-model` | **removed** | The agent collects its own context |
 | `api-key`, `endpoint`, `model`, `fallback-model`, `github-token`, `pr-number`, `title` | unchanged | |
 
@@ -121,7 +123,7 @@ Consumer workflows don't change, apart from dropping `context-model` if they set
 | `list_files(path?, pattern?)` | Lists tracked files (`git ls-files`), optionally filtered by glob. |
 | `grep(pattern, path?)` | Runs `git grep -n` in the PR checkout. Output is capped. |
 | `git(args[])` | Allowlist: `diff`, `log`, `show`, `merge-base`, `rev-parse`, `cat-file -e`, `ls-files`, `status`. Always passes `--no-ext-diff --no-textconv` where they apply, and rejects `-c`, `--output`, and `-C`. Runs with `GIT_CONFIG_NOSYSTEM=1` and an empty `HOME`, so repo or global config can't trigger helpers. |
-| `fetch_url(url, raw?)` | *Optional, Phase 7.* Unauthenticated HTTPS GET of a URL whose host is allowed by `fetch-allowlist`, not blocked, and resolves to public addresses only; the response is returned as text. Only offered when the input is set. |
+| `fetch_url(url, raw?, question?)` | *Optional, Phase 7; `question` since Phase 8c.* Unauthenticated HTTPS GET of a URL whose host is allowed by `fetch-allowlist`, not blocked, and resolves to public addresses only; the response is returned as text. Only offered when the input is set. |
 | `add_finding(path, line, priority, title, body)`, `remove_finding(id)` | *Phase 6.* Stage or remove a finding; the result lists the staged findings and where each will be posted. |
 | `submit_review(report)` | Ends the loop and returns the Markdown report (without the findings since Phase 6). |
 
@@ -218,6 +220,26 @@ Real runs produced "findings" that only confirmed the change was correct (e.g. a
 - New input `check-model` (env `CHECK_MODEL`), default `gemini-3.5-flash-lite`; empty disables the check. It uses the same endpoint and API key. Dropped findings are logged with the reason, and the check's token usage gets its own row in the job summary.
 - Decided: one request per finding rather than one for all, so each check stays small enough for a small model and one bad answer only affects one finding. On a local endpoint, Qwen3-Coder-30B-A3B, Gemma-4-26B-A4B and Gemma 4 E4B consistently dropped the "the fix is correct" finding and kept two real bugs; a vague "might be a race condition" finding without a fix was dropped only some of the time. Llama 3.2 1B dropped everything.
 - `test/check.test.js`: verdict parsing, prompt building, and against a fake endpoint: dropping, failing open, and one tool-less request per finding.
+
+### Phase 8c — Extract docs with the support model *(optional, after Phases 7 and 8)*
+
+With the self-hosted models (Qwen3-Coder-30B-A3B for the review, Gemma 4 E4B for the check) the context window is 100k–200k tokens. A single `fetch_url` result can be 50 KB (~12k tokens), and it stays in the context for every remaining turn, although the agent usually needs one signature, default or deprecation note from it. Summarizing would lose exactly those details, and a small model can make them up. So the small model only *selects*, and the action copies the selected lines.
+
+- `check-model` is renamed to `support-model` (env `SUPPORT_MODEL`), since it's no longer only used for the check. Empty disables both uses. `fetch_url` only offers `question` when it's set.
+- `fetch_url(url, raw?, question?)`: if `question` is set and the response text is larger than `EXTRACT_THRESHOLD_BYTES` (~8 KB), the text goes through `extract.js` instead of being truncated. Without `question`, or for small responses, the behaviour is unchanged. The tool description and the preamble ask for a `question` on docs pages and large API documents.
+- `extract.js`:
+  - Preparation (deterministic): JSON bodies are pretty-printed, so that minified documents (e.g. npm packuments) have lines to select; the text is split into chunks of ~16 KB at line boundaries, each line prefixed with its number.
+  - One request per chunk to the support model, one after the other (self-hosted servers may not queue concurrent requests): a short system prompt, the question and the numbered chunk. The model answers with line ranges (`12-30, 41-44`) or `NONE`. It never writes content itself, so its output is short (fast on a small model), and nothing in the result can be made up.
+  - The action copies the selected lines, adds a couple of lines of context on each side (small models are often off by a line or two), merges overlapping ranges, and keeps the original line numbers. Result: the usual header (URL, status, content type) plus `Extract for "<question>": lines 120–160, 410–431 of 2,300`, capped at `EXTRACT_MAX_BYTES` (~8 KB).
+  - Nothing selected: return that no part of the page matched, its size, and the first lines (title, table of contents), so the agent can ask again or fetch a more specific URL.
+  - At most the first 256 KB are searched (at most 16 chunks), so a huge document doesn't turn into dozens of requests.
+  - Fails open: if a chunk request fails or no answer can be parsed, the tool returns the truncated text as it does today, with a warning in the log.
+- `htmlToText` also drops `<nav>` and `<footer>`, and a script or style left open where the response was cut at 1 MB. The `<head>` and scripts were already removed, so they never reach the support model; measured on real docs pages, navigation was the remaining overhead (MDN: 6.8 KB → 3.5 KB of text, which is then below the extraction threshold). `<header>` and `<aside>` are kept: they can hold the title or notes, and dropping them saved little. With `raw`, there is no extraction.
+- Responses are cached by requested URL for the duration of the run, so asking a second question about the same page doesn't download it again.
+- The support model uses the same endpoint and API key. Each extraction is logged (URL, question, selected ranges, bytes before → after), and its token usage gets its own row in the job summary.
+- Tests (`test/extract.test.js`): range parsing (lenient: Markdown, spaces, single lines, out-of-range and reversed ranges), chunking at line boundaries, padding and merging, JSON pretty-printing, the cap, and against a fake endpoint: one request per chunk, `NONE`, failing open. `test/fetch.test.js`: the threshold and the cache.
+
+The same selector is meant to be reused later for large outputs of the other tools (`grep`, `git log`, `git diff`, `read_file` of large files), where verbatim lines matter even more.
 
 ### Phase 9 — Remove this plan
 
