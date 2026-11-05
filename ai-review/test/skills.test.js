@@ -144,7 +144,7 @@ describe("prompt assembly", () => {
       "checked out at `/work/pr`",
       "You have no shell",
       "call several tools in one turn when the calls don't depend on each other's results",
-      "call `submit_review` exactly once",
+      "call `finalize_review` exactly once with a summary",
       "Stage each finding with `add_finding` once it has survived verification",
       "`remove_finding`",
       "without the findings and their priority sections",
