@@ -1,7 +1,7 @@
 const { runAgent, DEFAULT_MAX_TURNS } = require("./agent.js");
 const { checkFindings } = require("./check.js");
 const { createExtractor } = require("./extract.js");
-const { createFetchTool, parseHostList } = require("./fetch.js");
+const { createFetchTool, parseHostList, parseSources } = require("./fetch.js");
 const { createFindingTools, renderReview } = require("./findings.js");
 const { fetchPullRequest, fillDiffAnchors, fetchCommentableLines, postReview } = require("./github.js");
 const { DEFAULT_SKILL, loadSkills, selectSkills, buildEnvironmentPreamble, buildSystemPrompt, buildUserPrompt } = require("./skills.js");
@@ -40,6 +40,11 @@ async function review({ github, context, core }) {
   const allowedHosts = parseHostList(process.env.FETCH_ALLOWLIST);
   const extractor = allowedHosts.length > 0 && supportModel ? createExtractor(core, { endpoint, apiKey, model: supportModel }) : undefined;
   const fetch = allowedHosts.length > 0 ? { allowedHosts, blockedHosts: parseHostList(process.env.FETCH_BLOCKLIST), extract: extractor?.extract } : undefined;
+  if (fetch) {
+    fetch.sources = parseSources(process.env.FETCH_SOURCES, fetch, (line, reason) => core.warning(`ai-review: skipping fetch source "${line}": ${reason}`));
+  } else if (process.env.FETCH_SOURCES?.trim()) {
+    core.warning("ai-review: fetch-sources is set, but fetch-allowlist is empty, so the agent has no network access; ignoring the sources.");
+  }
   const { owner, repo } = context.repo;
 
   if (!prNumber) {
@@ -82,7 +87,7 @@ async function review({ github, context, core }) {
   const findingTools = createFindingTools({ repoPath, commentable });
   const tools = [...createTools({ repoPath, skillsPath }), ...findingTools.tools];
   if (fetch) {
-    core.info(`ai-review: fetch_url enabled for ${allowedHosts.join(", ")}; blocked: ${fetch.blockedHosts.join(", ") || "none"}; extraction: ${extractor ? `"${supportModel}"` : "off"}`);
+    core.info(`ai-review: fetch_url enabled for ${allowedHosts.join(", ")}; blocked: ${fetch.blockedHosts.join(", ") || "none"}; extraction: ${extractor ? `"${supportModel}"` : "off"}; ${fetch.sources.length} source(s)`);
     tools.push(createFetchTool({ ...fetch, onRequest: (message) => core.info(`ai-review: fetch_url: ${message}`) }));
   }
   const result = await runAgent(core, {

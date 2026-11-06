@@ -52,6 +52,10 @@ inputs:
     description: "Domains the agent may never fetch from, including their subdomains (comma- or newline-separated), e.g. your tailnet's ts.net domain"
     required: false
     default: ""
+  fetch-sources:
+    description: "Additional sources the agent is told about, one per line: what the source covers and how to use it, with at least one https URL (e.g. a docs llms.txt or a docs search API). Lines whose hosts aren't allowed by fetch-allowlist or are blocked are skipped with a warning"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -86,6 +90,7 @@ runs:
         MAX_TURNS: ${{ inputs.max-turns }}
         FETCH_ALLOWLIST: ${{ inputs.fetch-allowlist }}
         FETCH_BLOCKLIST: ${{ inputs.fetch-blocklist }}
+        FETCH_SOURCES: ${{ inputs.fetch-sources }}
         REPO_PATH: ${{ github.workspace }}/.ai-review/pr
         SKILLS_PATH: ${{ github.workspace }}/.ai-review/agents
       with:

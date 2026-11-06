@@ -23,6 +23,7 @@ Steps (one PR each unless noted):
 8. **Finding check (optional):** check each staged finding with a small model in an independent request and drop the ones that don't name a problem or propose a fix.
 8c. **Docs extraction (optional):** for large `fetch_url` responses, a small model picks the line ranges that answer the agent's question; the action copies those lines verbatim.
 8d. **Summary instead of report:** rename `submit_review(report)` to `finalize_review(summary)`, so the model doesn't repeat the findings or their priority sections in its text.
+8e. **Fetch sources (optional):** a `fetch-sources` input that tells the agent about additional sources for `fetch_url` (docs, docs search APIs), without tying the action to one provider.
 9. **Cleanup:** remove this plan.
 
 ---
@@ -104,6 +105,7 @@ ai-review/
 | `max-turns` | **new** | Agent loop limit, default `40` |
 | `fetch-allowlist` | **new** (Phase 7, optional) | Hosts the agent may fetch from (comma- or newline-separated), or `*` for any public host; empty (default) disables network access |
 | `fetch-blocklist` | **new** (Phase 7, optional) | Domains (with their subdomains) the agent may never fetch from, e.g. the tailnet |
+| `fetch-sources` | **new** (Phase 8e, optional) | Additional sources the agent is told about, one per line with at least one `https://` URL; lines with hosts that can't be fetched are skipped |
 | `support-model` | **new** (Phase 8, optional; named `check-model` until Phase 8c) | Smaller model that checks each staged finding before posting and, since Phase 8c, extracts the relevant lines of large `fetch_url` responses; empty disables both |
 | `context-model` | **removed** | The agent collects its own context |
 | `api-key`, `endpoint`, `model`, `fallback-model`, `github-token`, `pr-number`, `title` | unchanged | |
@@ -249,6 +251,18 @@ The model kept writing the skill's report format into `submit_review`, including
 - `submit_review(report)` is renamed to `finalize_review(summary)`, described as finalizing the review with the staged findings and taking only a summary without them. With "submit the final review report" / "the complete review report", models wrote the findings into the report as well (following the skill's report format), so a finding dropped by the check was still posted. The preamble asks for the summary in the same terms.
 - The job log also shows how long the review took ("finished after 3m 07s"), even if the review fails.
 - `test/agent.test.js` and `test/skills.test.js` use the new tool name and wording.
+
+### Phase 8e — Configurable sources for `fetch_url` *(optional, after Phase 7)*
+
+With `fetch-allowlist: "*"` the agent can reach any public docs, but it only uses what it knows about: the examples in the preamble and links in the PR or `AGENTS.md`. Project docs (e.g. `https://docs.safefoundation.org/llms.txt`) or a docs search service like Context7 are never used unless someone points the agent at them.
+
+- New input `fetch-sources` (env `FETCH_SOURCES`): one source per line, free text describing what it covers and how to use it, with at least one `https://` URL; placeholders like `<library>` are fine. Empty lines and `#` comments are skipped.
+- `fetch.js`: `parseSources` keeps a line only if it has an `https://` URL and every host in it passes the same checks as a request (allowlist, blocklist, no IP addresses); otherwise the line is skipped with a warning, so the agent isn't pointed at sources it can't reach. Without network access, the input is ignored with a warning.
+- The preamble lists the sources before the generic examples and asks the agent to check them first when the PR relies on something they cover.
+- Decided: free text instead of a structured format (name, URL template, parameters). The workflow author writes it, so it's trusted, and free text can describe multi-step usage like Context7's search-then-fetch. No provider is built in; Context7 and the Safe docs are only README examples. Requests stay unauthenticated, so sources that need an API key aren't supported (yet).
+- Decided: an input rather than MCP support. Context7 and Mintlify docs sites (e.g. the Safe docs) also offer MCP servers, but their plain HTTP endpoints (`/api/v1/search`, `llms.txt`) give the same content through `fetch_url`; the gap was discoverability, not access. MCP would also expose tools that write (e.g. the Safe docs server's `submit_feedback`).
+- Tests: `test/fetch.test.js` (parsing, skipped lines and reasons), `test/skills.test.js` (sources in the preamble).
+- README: the input, how the sources reach the agent, and an example with the Safe docs and Context7.
 
 ### Phase 9 — Remove this plan
 
