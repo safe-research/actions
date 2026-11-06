@@ -73,6 +73,30 @@ function parseHostList(value) {
     .filter(Boolean);
 }
 
+// Parses the configured sources: one per line, free text describing what the source covers and how to use it, with
+// at least one https URL (placeholders like `<library>` are fine). Empty lines and `#` comments are skipped. A line is
+// dropped, with `onSkip(line, reason)`, if it has no URL or one of its hosts can't be fetched under `policy`, so the
+// agent isn't pointed at sources it can't reach.
+function parseSources(value, policy, onSkip = () => {}) {
+  const sources = [];
+  for (const raw of (value || "").split("\n")) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const hosts = [...line.matchAll(/https:\/\/([^/\s?#:<>`]+)/gi)].map((match) => match[1]);
+    if (hosts.length === 0) {
+      onSkip(line, "no https URL");
+      continue;
+    }
+    try {
+      for (const host of hosts) checkUrl(`https://${host}/`, policy);
+      sources.push(line);
+    } catch (err) {
+      onSkip(line, err.message);
+    }
+  }
+  return sources;
+}
+
 function isInDomain(host, domain) {
   return host === domain || host.endsWith(`.${domain}`);
 }
@@ -306,4 +330,4 @@ function createFetchTool({
   };
 }
 
-module.exports = { ANY_HOST, createFetchTool, parseHostList, checkUrl, isPublicAddress, publicOnlyLookup, htmlToText, decodeEntities };
+module.exports = { ANY_HOST, createFetchTool, parseHostList, parseSources, checkUrl, isPublicAddress, publicOnlyLookup, htmlToText, decodeEntities };

@@ -177,6 +177,13 @@ describe("prompt assembly", () => {
     assert.ok(!preamble.includes("no network access"));
   });
 
+  it("lists the configured sources before the examples", () => {
+    const fetch = { allowedHosts: ["*"], blockedHosts: [] };
+    assert.ok(!buildEnvironmentPreamble({ ...preambleArgs, fetch: { ...fetch, sources: [] } }).includes("set up for this review"));
+    const preamble = buildEnvironmentPreamble({ ...preambleArgs, fetch: { ...fetch, sources: ["Safe docs: https://docs.safefoundation.org/llms.txt", "Context7: https://context7.com/api/v1/search?query=<library>"] } });
+    assert.ok(preamble.includes("These sources were set up for this review. Check them first when the PR relies on something they cover:\n\n- Safe docs: https://docs.safefoundation.org/llms.txt\n- Context7: https://context7.com/api/v1/search?query=<library>\n\nUse it to check what the code relies on"));
+  });
+
   it("asks for a question only when fetch_url extracts", () => {
     const fetch = { allowedHosts: ["*"], blockedHosts: [] };
     assert.ok(!buildEnvironmentPreamble({ ...preambleArgs, fetch }).includes("question"));
