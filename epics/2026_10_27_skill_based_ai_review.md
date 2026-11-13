@@ -84,7 +84,7 @@ ai-review/
   agent.js         # tool-calling loop (Phase 3)
   skills.js        # SKILL.md loading + prompt assembly (Phase 4)
   local-test.js    # + local checkout / skills dir support
-  test/*.test.js   # node:test, run with `node --test ai-review/test`
+  test/*.test.js   # node:test, run with `node --test 'ai-review/test/*.test.js'`
 ```
 
 ### Inputs (`action.yaml`)
