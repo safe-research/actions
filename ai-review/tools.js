@@ -12,6 +12,8 @@ const GIT_DIFF_SUBCOMMANDS = ["diff", "log", "show"];
 // Git accepts unambiguous prefixes of long options, so any prefix of these is rejected as well.
 const FORBIDDEN_LONG_OPTIONS = ["output", "no-index", "ext-diff", "textconv", "orderfile", "git-dir", "work-tree", "exec-path", "config-env"];
 const FORBIDDEN_SHORT_OPTIONS = ["-c", "-C", "-O"];
+// Listed in the tool description and in errors, so the model doesn't have to find them one failed call at a time.
+const FORBIDDEN_OPTIONS_TEXT = `${[...FORBIDDEN_SHORT_OPTIONS, ...FORBIDDEN_LONG_OPTIONS.map((option) => `--${option}`)].join(", ")} (and abbreviations of the long options)`;
 
 function truncate(text, maxBytes = MAX_OUTPUT_BYTES) {
   const buffer = Buffer.from(text, "utf8");
@@ -28,12 +30,12 @@ function isInside(root, target) {
 
 function checkForbiddenGitArg(arg) {
   if (FORBIDDEN_SHORT_OPTIONS.some((option) => arg.startsWith(option))) {
-    throw new Error(`git option "${arg}" is not allowed`);
+    throw new Error(`git option "${arg}" is not allowed; rejected options: ${FORBIDDEN_OPTIONS_TEXT}`);
   }
   if (arg.startsWith("--") && arg.length > 2) {
     const name = arg.slice(2).split("=")[0];
     if (FORBIDDEN_LONG_OPTIONS.some((option) => option.startsWith(name))) {
-      throw new Error(`git option "${arg}" is not allowed`);
+      throw new Error(`git option "${arg}" is not allowed; rejected options: ${FORBIDDEN_OPTIONS_TEXT}`);
     }
   }
 }
@@ -186,7 +188,7 @@ function createTools({ repoPath, skillsPath, maxOutputBytes = MAX_OUTPUT_BYTES }
     },
     {
       name: "git",
-      description: `Run a read-only git command in the PR checkout. Allowed subcommands: ${GIT_SUBCOMMANDS.join(", ")} (cat-file only with -e). Options that write files or run external programs are rejected.`,
+      description: `Run a read-only git command in the PR checkout. Allowed subcommands: ${GIT_SUBCOMMANDS.join(", ")} (cat-file only with -e). Options that write files, read files outside the repository or run external programs are rejected: ${FORBIDDEN_OPTIONS_TEXT}. To compare file versions, use commits or blobs (e.g. \`diff <base> HEAD -- <path>\`, \`show <commit>:<path>\`); comparing arbitrary files (--no-index) isn't possible.`,
       parameters: {
         type: "object",
         properties: {

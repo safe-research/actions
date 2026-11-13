@@ -150,6 +150,28 @@ describe("runAgent", () => {
     assert.equal(toolMessages[3].content, "Error: report must be a non-empty string");
   });
 
+  it("runs the calls before submit_review in the same turn and warns about the ones after it", async () => {
+    fake.script(
+      () => assistant({
+        toolCalls: [
+          toolCall("c1", "read_file", { path: "a.js" }),
+          toolCall("c2", "submit_review", { report: "ok" }),
+          toolCall("c3", "read_file", { path: "late.js" }),
+          toolCall("c4", "fail", {}),
+        ],
+      }),
+    );
+    const warnings = [];
+
+    const { report } = await runAgent({ ...core, warning: (msg) => warnings.push(msg) }, {
+      endpoint, apiKey: "k", model: "primary", systemPrompt: "s", userPrompt: "u", tools: stubTools,
+    });
+
+    assert.equal(report, "ok");
+    assert.deepEqual(toolRuns, ["a.js"]);
+    assert.deepEqual(warnings, ["ai-review: turn 1: 2 tool call(s) after submit_review were not run: read_file, fail"]);
+  });
+
   it("caps tool output", async () => {
     fake.script(
       () => assistant({ toolCalls: [toolCall("c1", "big", {})] }),

@@ -91,12 +91,17 @@ async function handleMessage(core, { messages, message, turn, toolsByName, maxTo
   if (typeof message.content === "string" && message.content.trim() !== "") {
     core.debug(`ai-review: turn ${turn}: model text: ${message.content}`);
   }
-  for (const call of calls) {
+  for (const [index, call] of calls.entries()) {
     let content;
     if (call.function?.name === SUBMIT_REVIEW_TOOL.function.name) {
       const { report, error } = readSubmission(call);
       if (report !== undefined) {
         core.info(`ai-review: turn ${turn}: review submitted (${Buffer.byteLength(report)} bytes)`);
+        // The prompt asks for submit_review as the last call; calls after it (e.g. a late add_finding) are lost.
+        const skipped = calls.slice(index + 1).map((later) => later.function?.name);
+        if (skipped.length > 0) {
+          core.warning(`ai-review: turn ${turn}: ${skipped.length} tool call(s) after submit_review were not run: ${skipped.join(", ")}`);
+        }
         return report;
       }
       content = error;
