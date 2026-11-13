@@ -50,6 +50,7 @@ The log shows the progress: each step, and for every turn the model, the token u
 | `max-turns` | no | `40` | Maximum number of agent turns (model requests) before the model is asked to finalize the review |
 | `fetch-allowlist` | no | `""` | Hosts the agent may send HTTPS GET requests to (comma- or newline-separated exact hostnames), or `*` for any public host; empty disables network access. See [Network access](#network-access) |
 | `fetch-blocklist` | no | `""` | Domains the agent may never fetch from, including their subdomains (e.g. your tailnet's `ts.net` domain) |
+| `fetch-sources` | no | `""` | Additional sources the agent is told about, one per line with at least one `https://` URL. See [Network access](#network-access) |
 
 Requires `contents: read` and `pull-requests: write` permissions. Because the action checks out the PR's code (it only reads it, nothing is executed), don't run it on `pull_request_target`; fork PRs without access to the API key secret can't be reviewed.
 
@@ -94,6 +95,8 @@ By default the agent has no network access. With `fetch-allowlist` set, it gets 
 - With `support-model` set, the model can pass a `question` with the URL. For responses over 8 KB, `support-model` then picks the line ranges that answer it (it only answers with line numbers), and the action returns those lines verbatim with their line numbers, up to 8 KB, instead of the start of the page. JSON is pretty-printed first, so minified documents have lines to pick. If the support model fails or gives no usable answer, the response is returned from the start as without a question. Responses are cached for the run, so another question about the same page doesn't download it again.
 - Every request is logged with its status in the job log.
 
+The agent only knows the sources it's told about. With `fetch-sources`, you can point it at documentation and APIs it wouldn't find on its own, e.g. your project's docs or a docs search service. Each line describes one source in free text, what it covers and how to use it, with at least one `https://` URL (placeholders like `<library>` are fine). The lines are listed in the system prompt, so the agent checks these sources first. A line is skipped with a warning if it has no `https://` URL or if one of its hosts isn't allowed by `fetch-allowlist` or is blocked. For docs that only matter to one repository, a link in its `AGENTS.md` works as well, and the skill reads that file anyway.
+
 The risk: anything on an allowed host becomes reachable, and the URL itself is a channel out of the job. Prompt injection in the PR could make the agent put repository content into a URL sent to a host the attacker controls, which is why `*` is only acceptable when that content is public anyway. The action runs read-only and the agent's tools have no access to secrets. Use it for public repositories; for private ones, use an explicit list of hosts that don't expose request URLs to third parties, or leave network access disabled.
 
 ```yaml
@@ -102,6 +105,9 @@ The risk: anything on an allowed host becomes reachable, and the URL itself is a
           api-key: ${{ secrets.GEMINI_API_KEY }}
           fetch-allowlist: "*"
           fetch-blocklist: tail1234.ts.net
+          fetch-sources: |
+            Safe protocol docs: https://docs.safefoundation.org/llms.txt (page index), https://docs.safefoundation.org/llms-full.txt (all pages; ask a question)
+            Library docs (Context7): search with https://context7.com/api/v1/search?query=<library>, then fetch https://context7.com/api/v1/<library id>?type=txt&topic=<topic>&tokens=5000
 ```
 
 For Gemini, get an API key from [Google AI Studio](https://aistudio.google.com/app/apikey). Any other OpenAI-compatible server works by setting `endpoint` and the model inputs (e.g. a self-hosted server reached via [`tailscale/github-action`](https://github.com/tailscale/github-action)).
@@ -118,7 +124,7 @@ MODEL=gemini-3.6-flash FALLBACK_MODEL=gemini-3.5-flash-lite \
 node ai-review/local-test.js
 ```
 
-`SKILL`, `MAX_TURNS`, `SUPPORT_MODEL`, `FETCH_ALLOWLIST` and `FETCH_BLOCKLIST` are read from the environment as well; without `SUPPORT_MODEL`, the findings aren't checked and `fetch_url` responses aren't extracted. `DEBUG=1` also prints the details: the system prompt, the full output of every tool call, and the raw model responses. Set `GITHUB_TOKEN` to avoid GitHub's unauthenticated rate limit.
+`SKILL`, `MAX_TURNS`, `SUPPORT_MODEL`, `FETCH_ALLOWLIST`, `FETCH_BLOCKLIST` and `FETCH_SOURCES` are read from the environment as well; without `SUPPORT_MODEL`, the findings aren't checked and `fetch_url` responses aren't extracted. `DEBUG=1` also prints the details: the system prompt, the full output of every tool call, and the raw model responses. Set `GITHUB_TOKEN` to avoid GitHub's unauthenticated rate limit.
 
 Instead of passing the variables on the command line, you can put them in a `.env` file (one `KEY=value` per line) in the directory you run the script from; it's ignored by git. Variables set in the shell take precedence over the file:
 

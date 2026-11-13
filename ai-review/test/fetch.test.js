@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const { after, before, describe, it } = require("node:test");
 
-const { createFetchTool, parseHostList, checkUrl, isPublicAddress, publicOnlyLookup, htmlToText, decodeEntities } = require("../fetch.js");
+const { createFetchTool, parseHostList, parseSources, checkUrl, isPublicAddress, publicOnlyLookup, htmlToText, decodeEntities } = require("../fetch.js");
 
 const ANY = { allowedHosts: ["*"], blockedHosts: [] };
 
@@ -18,6 +18,37 @@ describe("parseHostList", () => {
     assert.deepEqual(parseHostList("*"), ["*"]);
     assert.deepEqual(parseHostList(""), []);
     assert.deepEqual(parseHostList(undefined), []);
+  });
+});
+
+describe("parseSources", () => {
+  const CONTEXT7 = "Library docs (Context7): search https://context7.com/api/v1/search?query=<library>, then fetch https://context7.com/api/v1/<library id>?type=txt&topic=<topic>&tokens=5000";
+  const SAFE = "Safe protocol docs: https://docs.safefoundation.org/llms.txt (index), https://docs.safefoundation.org/llms-full.txt (all pages)";
+
+  it("keeps lines with reachable URLs and skips empty lines and comments", () => {
+    const skipped = [];
+    const sources = parseSources(`\n  ${CONTEXT7}  \n# a comment\n\n${SAFE}\n`, ANY, (line, reason) => skipped.push([line, reason]));
+    assert.deepEqual(sources, [CONTEXT7, SAFE]);
+    assert.deepEqual(skipped, []);
+    assert.deepEqual(parseSources("", ANY), []);
+    assert.deepEqual(parseSources(undefined, ANY), []);
+  });
+
+  it("skips lines without an https URL or with a host that can't be fetched", () => {
+    const skipped = [];
+    const policy = { allowedHosts: ["context7.com", "internal.example"], blockedHosts: ["internal.example"] };
+    const sources = parseSources(
+      [CONTEXT7, SAFE, "Wiki: https://internal.example/wiki", "Docs: http://context7.com/", "Ask the team"].join("\n"),
+      policy,
+      (line, reason) => skipped.push(`${line.split(":")[0]}: ${reason}`),
+    );
+    assert.deepEqual(sources, [CONTEXT7]);
+    assert.deepEqual(skipped, [
+      "Safe protocol docs: host is not in the allowlist: docs.safefoundation.org; allowed: context7.com, internal.example",
+      "Wiki: host is blocked: internal.example",
+      "Docs: no https URL",
+      "Ask the team: no https URL",
+    ]);
   });
 });
 
