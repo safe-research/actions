@@ -19,7 +19,8 @@ Steps (one PR each unless noted):
 4. **Skill loading:** load `SKILL.md` files from a directory and build the system prompt from the main skill plus an index of the other skills.
 5. **Switch over:** check out the PR and the agents repo in `action.yaml`, wire 2–4 together, remove the two-pass flow, and update the README and `local-test.js`.
 6. **Inline comments (optional):** have `submit_review` return structured findings and post them as inline comments.
-7. **Cleanup:** remove this plan.
+7. **Allowlisted HTTP access (optional):** a `fetch_url` tool limited to a configured list of hosts, so the skill's `curl` steps work for trusted domains.
+8. **Cleanup:** remove this plan.
 
 ---
 
@@ -44,13 +45,13 @@ Project rules such as `snippets/coding-guidelines.md` and `snippets/testing-guid
 `review-pr` needs an agent: it has to read files, grep for callers, run `git diff`/`git log`, and decide on its own what context to collect. We implement a small tool-calling loop over the existing chat completions endpoint (`tools` / `tool_calls`) instead of adopting an agent CLI:
 
 - **Provider-agnostic:** Gemini (default), self-hosted OpenAI-compatible servers (e.g. reached via Tailscale), and fallback models keep working.
-- **No arbitrary shell:** the tools are JS functions. `git` runs via `execFile` with an allowlist of read-only subcommands. Paths are confined to the PR checkout. Nothing has network access. This limits what prompt injection in a PR can do.
+- **No arbitrary shell:** the tools are JS functions. `git` runs via `execFile` with an allowlist of read-only subcommands. Paths are confined to the PR checkout. Nothing has network access by default; the optional Phase 7 adds HTTP GET requests limited to an allowlist of hosts. This limits what prompt injection in a PR can do.
 - **No new runtime dependencies:** it still runs inside `actions/github-script`, and `local-test.js` keeps working.
 
 The skill's instructions are written for a shell (`curl`, `git`, `sha256sum`, `GITHUB_EVENT_PATH`). An **environment preamble** in the action closes that gap, so the skill doesn't need CI-specific changes:
 
 - It gives the PR metadata (number, title, body, URL, base/head SHA, repository) directly. This replaces Step 1's API and event-file lookups, which also don't work for `workflow_dispatch` runs.
-- It lists the available tools and says that network access and subagents are unavailable. The skill's parallel verification is already optional ("when subagents are available").
+- It maps the skill's shell commands to the tools (whose definitions are sent via the request's `tools` field) and says that network access and subagents are unavailable. The skill's parallel verification is already optional ("when subagents are available").
 - It asks for the final report via the `submit_review` tool.
 
 ### Secrets stay out of the agent
@@ -94,6 +95,7 @@ ai-review/
 | `skills-ref` | **new** | Commit SHA of `safe-research/agents`; defaults to a pinned SHA |
 | `skill` | **new** | Main skill name, default `review-pr` |
 | `max-turns` | **new** | Agent loop limit, default `40` |
+| `fetch-allowlist` | **new** (Phase 7, optional) | Hosts the agent may fetch from (comma- or newline-separated); empty (default) disables network access |
 | `context-model` | **removed** | The agent collects its own context |
 | `api-key`, `endpoint`, `model`, `fallback-model`, `github-token`, `pr-number`, `title` | unchanged | |
 
@@ -113,6 +115,7 @@ Consumer workflows don't change, apart from dropping `context-model` if they set
 | `list_files(path?, pattern?)` | Lists tracked files (`git ls-files`), optionally filtered by glob. |
 | `grep(pattern, path?)` | Runs `git grep -n` in the PR checkout. Output is capped. |
 | `git(args[])` | Allowlist: `diff`, `log`, `show`, `merge-base`, `rev-parse`, `cat-file -e`, `ls-files`, `status`. Always passes `--no-ext-diff --no-textconv` where they apply, and rejects `-c`, `--output`, and `-C`. Runs with `GIT_CONFIG_NOSYSTEM=1` and an empty `HOME`, so repo or global config can't trigger helpers. |
+| `fetch_url(url)` | *Optional, Phase 7.* HTTPS GET of a URL whose host is in `fetch-allowlist`; only offered when the input is set. |
 | `submit_review(report)` | Ends the loop and returns the Markdown report. |
 
 All paths are resolved with `realpath` and must stay inside `REPO_PATH` or `SKILLS_PATH`. Symlinks that point outside are rejected.
@@ -161,7 +164,7 @@ Merge `feat/pr_review` into `main` of the agents repo. This is required before P
 ### Phase 4 — Skill loading and prompt assembly
 
 - `skills.js`: parse `skills/*/SKILL.md` frontmatter (`name`, `description`), return the main skill body and an index of the other skills (`name`, `description`, path readable via `read_file`).
-- Environment preamble text (PR metadata, tool list, no network/subagents, submit via `submit_review`).
+- Environment preamble text (PR metadata, mapping of shell commands to tools, no network/subagents, submit via `submit_review`).
 - `test/skills.test.js` with fixture skills.
 
 ### Phase 5 — Switch the action to the skill-based review
@@ -177,7 +180,24 @@ Merge `feat/pr_review` into `main` of the agents repo. This is required before P
 - Extend `submit_review` with an optional `findings[]` (`path`, `line`, `priority`, `body`) next to `report`. Post findings on changed lines as inline comments and keep the rest in the body. The fold-into-body fallback stays.
 - Only worth doing if the posted reports turn out to be hard to act on as a single comment.
 
-### Phase 7 — Remove this plan
+### Phase 7 — Allowlisted HTTP access *(optional, after Phase 5)*
+
+The skill uses `curl` for the GitHub API, for interfaces outside the repository ("check them as they were when the PR was written"), and for docs. Give the agent read-only HTTP access, limited to hosts the consumer explicitly allows.
+
+- New input `fetch-allowlist`, passed to `review.js` as the `FETCH_ALLOWLIST` env var: a comma- or newline-separated list of hostnames, e.g. `api.github.com, raw.githubusercontent.com`. A URL is allowed if its hostname (`new URL(url).hostname`) exactly equals one of them; no wildcards or subdomains. Empty (the default) keeps today's behaviour: no `fetch_url` tool and no network access.
+- `fetch_url(url)` tool in `tools.js`, implemented with Node's `fetch` rather than by spawning `curl`, so there are no flags to abuse (`-o`, `-d`, `-K`, `file://`, …):
+  - `https:` only, `GET` only, no request body, and no credentials: no `github-token`, no cookies, no `Authorization` header from the environment.
+  - Redirects aren't followed; a redirect response is returned to the model as an error naming the target, which it can fetch if that host is allowed.
+  - Timeout (e.g. 15 s) and the same 50 KB output cap as the other tools.
+  - Each request is logged with `core.info` (URL and status), so the job log shows what the agent fetched.
+- The environment preamble (`skills.js`) lists `fetch_url` and the allowed hosts when it's enabled, instead of saying there's no network access, and tells the model to use `fetch_url` where the skill says `curl`.
+- `local-test.js` reads `FETCH_ALLOWLIST` from the environment as well.
+- `test/tools.test.js`: allowlist parsing, exact host matching (`allowed.com.evil.com`, `https://allowed.com@evil.com/`), non-HTTPS URLs, redirects, and the output cap, against a local fake server. `test/skills.test.js`: preamble with and without the allowlist.
+- README: document the input and the trade-off below.
+
+Risk: anything on an allowed domain becomes reachable, and the URL itself is a channel out of the job. Prompt injection in the PR could make the agent put repository content into a query string sent to an allowed host. For public repositories that leaks nothing new; for private repositories consumers should only allow hosts that don't log or expose request URLs to third parties. Requests are unauthenticated, so the agent still can't write anything via the GitHub API.
+
+### Phase 8 — Remove this plan
 
 - Delete `epics/2026_10_27_skill_based_ai_review.md`.
 
