@@ -1,7 +1,10 @@
 const { runAgent, DEFAULT_MAX_TURNS } = require("./agent.js");
-const { fetchPullRequest, fillDiffAnchors, postReview } = require("./github.js");
+const { createFindingTools, renderReview } = require("./findings.js");
+const { fetchPullRequest, fillDiffAnchors, fetchCommentableLines, postReview } = require("./github.js");
 const { DEFAULT_SKILL, loadSkills, selectSkills, buildEnvironmentPreamble, buildSystemPrompt, buildUserPrompt } = require("./skills.js");
 const { createTools } = require("./tools.js");
+
+const UNFINISHED_REPORT = "_The review didn't finish within the turn limit. The findings below were staged before that; the list may be incomplete._";
 
 const SYSTEM_PROMPT = `The current year is ${new Date().getFullYear()}. Newer versions of software, GitHub Actions, and model names than you're aware of from training may still be valid and correct. Do not flag version strings, action references (e.g. actions/checkout@vN), or model names as errors solely because they are unfamiliar to you.`;
 
@@ -36,6 +39,13 @@ module.exports = async ({ github, context, core }) => {
   core.info(`ai-review: fetching PR ${owner}/${repo}#${prNumber}`);
   const pr = await fetchPullRequest(github, { owner, repo, prNumber });
   core.info(`ai-review: PR "${pr.title}" (${pr.base.ref}...${pr.head.ref}, head ${pr.head.sha})`);
+  // Fetched before the review, so that `add_finding` can tell the model where a finding will be posted.
+  let commentable;
+  try {
+    commentable = await fetchCommentableLines(github, { owner, repo, prNumber });
+  } catch (err) {
+    core.warning(`ai-review: failed to list the PR's changed lines (${err.message}); posting all findings in the review body.`);
+  }
 
   const skills = loadSkills(skillsPath, {
     onError: (file, err) => core.warning(`ai-review: skipping skill ${file}: ${err.message}`),
@@ -53,6 +63,7 @@ module.exports = async ({ github, context, core }) => {
   const systemPrompt = `${SYSTEM_PROMPT}\n\n${buildSystemPrompt({ preamble, mainSkill, otherSkills })}`;
   core.debug(`ai-review: system prompt:\n${systemPrompt}`);
   core.info(`ai-review: starting review of ${repoPath} with "${model}" (fallback "${fallbackModel || "none"}", max ${maxTurns} turns, system prompt ${Buffer.byteLength(systemPrompt)} bytes)`);
+  const findingTools = createFindingTools({ repoPath, commentable });
   const result = await runAgent(core, {
     endpoint,
     apiKey,
@@ -60,10 +71,10 @@ module.exports = async ({ github, context, core }) => {
     fallbackModel,
     systemPrompt,
     userPrompt: buildUserPrompt(pr),
-    tools: createTools({ repoPath, skillsPath }),
+    tools: [...createTools({ repoPath, skillsPath }), ...findingTools.tools],
     maxTurns,
   });
-  core.info(`ai-review: review submitted by "${result.model}" after ${result.turns} turns (${result.usage.total_tokens} tokens).`);
+  core.info(`ai-review: review finished by "${result.model}" after ${result.turns} turns (${result.usage.total_tokens} tokens).`);
   await core.summary
     .addHeading(title, 3)
     .addTable([
@@ -72,8 +83,22 @@ module.exports = async ({ github, context, core }) => {
     ])
     .write();
 
-  const body = `## ${title}\n\n${fillDiffAnchors(result.report, pr.html_url)}`;
-  core.info(`ai-review: posting review (${Buffer.byteLength(body)} bytes)`);
-  await postReview(github, core, { owner, repo, prNumber, body });
+  const findings = findingTools.findings();
+  if (result.report === undefined && findings.length === 0) {
+    throw new Error(`no review was submitted within ${maxTurns} turns and no findings were staged`);
+  }
+  const review = renderReview({
+    report: result.report ?? UNFINISHED_REPORT,
+    findings,
+    commentable,
+    repoUrl: `${context.serverUrl}/${owner}/${repo}`,
+    headSha: pr.head.sha,
+  });
+  core.info(`ai-review: ${review.comments.length} of ${findings.length} finding(s) are on changed lines and are posted inline`);
+
+  const body = `## ${title}\n\n${fillDiffAnchors(review.body, pr.html_url)}`;
+  const comments = review.comments.map((c) => ({ ...c, body: fillDiffAnchors(c.body, pr.html_url) }));
+  core.info(`ai-review: posting review (${Buffer.byteLength(body)} bytes, ${comments.length} inline comment(s))`);
+  await postReview(github, core, { owner, repo, prNumber, body, comments });
   core.info("ai-review: review posted");
 };

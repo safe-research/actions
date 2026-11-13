@@ -204,11 +204,14 @@ describe("runAgent", () => {
     assert.match(fake.requests[2].body.messages.at(-1).content, /turn limit/);
   });
 
-  it("fails if nothing is submitted after the turn limit", async () => {
+  it("finishes without a report if nothing is submitted after the turn limit", async () => {
     const readAgain = () => assistant({ toolCalls: [toolCall("c", "read_file", { path: "a.js" })] });
     fake.script(readAgain, readAgain);
 
-    await assert.rejects(run({ maxTurns: 1 }), /no review was submitted within 1 turns/);
+    const result = await run({ maxTurns: 1 });
+
+    assert.equal(result.report, undefined);
+    assert.equal(result.turns, 2);
   });
 
   it("continues the conversation on the fallback model after a failure", async () => {
