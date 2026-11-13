@@ -1,5 +1,5 @@
 name: "AI Code Review"
-description: "Reviews a pull request with an OpenAI-compatible chat completions API and posts the result as a PR review"
+description: "Reviews a pull request with the review-pr skill in a read-only agent loop over an OpenAI-compatible chat completions API and posts the result as a PR review"
 inputs:
   api-key:
     description: "API key for the OpenAI-compatible endpoint"
@@ -12,10 +12,6 @@ inputs:
     description: "Model name to use for the review"
     required: false
     default: "gemini-3.6-flash"
-  context-model:
-    description: "Model name to use for determining whether additional context files are needed"
-    required: false
-    default: "gemini-3.5-flash-lite"
   fallback-model:
     description: "Model name to retry with if the primary model errors (e.g. due to rate limiting)"
     required: false
@@ -32,20 +28,51 @@ inputs:
     description: "Title identifying this reviewer, prefixed to the posted review (useful when multiple ai-review workflows run against the same PR)"
     required: false
     default: "AI Code Review"
+  skills-ref:
+    description: "Commit SHA of safe-research/agents to load the skills from"
+    required: false
+    default: "3e2cbcbc9865a2cd285c0dbeebd9954bce8e3d71"
+  skill:
+    description: "Name of the skill that defines the review instructions"
+    required: false
+    default: "review-pr"
+  max-turns:
+    description: "Maximum number of agent turns before the model is asked to submit its review"
+    required: false
+    default: "40"
 
 runs:
   using: "composite"
   steps:
+    # The PR code is untrusted: it is only read by the agent's tools, never executed, and no credentials are kept.
+    - name: Check out PR
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        ref: refs/pull/${{ inputs.pr-number }}/head
+        path: .ai-review/pr
+        fetch-depth: 0
+        persist-credentials: false
+        token: ${{ inputs.github-token }}
+    - name: Check out skills
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        repository: safe-research/agents
+        ref: ${{ inputs.skills-ref }}
+        path: .ai-review/agents
+        persist-credentials: false
     - name: Review PR
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       env:
         API_KEY: ${{ inputs.api-key }}
         API_ENDPOINT: ${{ inputs.endpoint }}
         MODEL: ${{ inputs.model }}
-        CONTEXT_MODEL: ${{ inputs.context-model }}
         FALLBACK_MODEL: ${{ inputs.fallback-model }}
         PR_NUMBER: ${{ inputs.pr-number }}
         TITLE: ${{ inputs.title }}
+        SKILL: ${{ inputs.skill }}
+        MAX_TURNS: ${{ inputs.max-turns }}
+        REPO_PATH: ${{ github.workspace }}/.ai-review/pr
+        SKILLS_PATH: ${{ github.workspace }}/.ai-review/agents
       with:
         github-token: ${{ inputs.github-token }}
         script: |

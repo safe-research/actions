@@ -60,7 +60,7 @@ The agent's tools never see `github-token`. The token is only used before the lo
 
 ### Output
 
-The skill's Markdown report (Step 5 format, with "Files changed" links) is posted as a `COMMENT` review body under the existing `## <title>` heading. The model can't compute the SHA-256 anchors without a shell, so `submit_review` post-processes links: either we provide a `sha256` helper tool or we rewrite `path:line` references into anchors when posting (decided in Phase 5, see Open Questions). Inline comments are deferred to the optional Phase 6.
+The skill's Markdown report (Step 5 format, with "Files changed" links) is posted as a `COMMENT` review body under the existing `## <title>` heading. The model can't compute the SHA-256 anchors without a shell, so the preamble tells it to write a `<file hash>` placeholder, and the action fills in the SHA-256 of the path from the link text when posting. Inline comments are deferred to the optional Phase 6.
 
 ### Alternatives Considered
 
@@ -171,7 +171,7 @@ Merge `feat/pr_review` into `main` of the agents repo. This is required before P
 
 - `action.yaml`: the two checkout steps, new inputs (`skills-ref`, `skill`, `max-turns`), and removal of `context-model`.
 - `review.js`: replace the two-pass flow with PR metadata → `skills.js` prompt → `agent.js` with `tools.js` → post the report. Remove `FILES_SCHEMA`, `REVIEW_SCHEMA`, and the unreachable native Gemini path (`callGemini`).
-- Resolve "Files changed" links: either rewrite `path:line` references into anchors or add a `sha256` tool.
+- Resolve "Files changed" links: the model writes a `<file hash>` placeholder, and `github.js` fills in the SHA-256 of the path from the link text before posting.
 - `local-test.js`: take `REPO_PATH` (a local checkout of the PR) and `SKILLS_PATH` (a local agents checkout) instead of fetching file contents via the API.
 - README: update the `ai-review` section (how it works, inputs, permissions, local testing).
 
@@ -208,7 +208,7 @@ Risk: anything on an allowed domain becomes reachable, and the URL itself is a c
 - **Harness choice:** this plan assumes we keep provider flexibility (Gemini / self-hosted) and therefore build our own loop. If we're fine using Claude only in CI, `claude-code-action` would replace Phases 2–4 and shrink Phase 5. **Please confirm before Phase 2.**
 - **Model capability:** we assume the default models (`gemini-3.6-flash`, fallback `gemini-3.5-flash-lite`) handle multi-turn tool calling over Gemini's OpenAI-compatible endpoint well enough to follow a skill this long. We'll check this with `local-test.js` on a few real PRs in Phase 5, and may change the default model.
 - **Cost / runtime:** an agentic review uses more tokens than the two-pass flow. `max-turns` and the output caps bound this. The defaults may need tuning after the first runs.
-- **Link anchors:** rewriting `path:line` into anchors after the fact vs. a `sha256` tool. Rewriting is more reliable; the tool keeps the skill output unchanged. To be decided in Phase 5.
+- **Link anchors:** decided in Phase 5: anchors are rewritten when posting (from the path in the link text) rather than computed by a `sha256` tool, since rewriting doesn't depend on the model calling the tool for every link.
 - **Subagent verification:** the skill's optional parallel verification isn't supported. A follow-up could add a `verify_finding` tool that runs a fresh, short sub-loop with only the claim.
 - **Skill wording:** we assume `review-pr` needs no CI-specific changes because the environment preamble covers the gaps. If it turns out to need some (e.g. its `curl` instructions confuse the model), that change goes to the agents repo, not here.
 - **Fork PRs:** the action keeps relying on the consumer's `pull_request` trigger. Fork PRs without secrets can't run it, as today. `pull_request_target` remains unsupported because the action checks out and reads untrusted PR code.
