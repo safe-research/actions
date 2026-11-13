@@ -16,6 +16,10 @@ inputs:
     description: "Model name to retry with if the primary model errors (e.g. due to rate limiting)"
     required: false
     default: "gemini-3.5-flash-lite"
+  check-model:
+    description: "Model that checks each staged finding before posting (a smaller model is enough); findings that don't name a problem or propose a fix are dropped. Empty disables the check"
+    required: false
+    default: "gemini-3.5-flash-lite"
   github-token:
     description: "The GITHUB_TOKEN required to read the PR and post the review"
     required: false
@@ -75,6 +79,7 @@ runs:
         API_ENDPOINT: ${{ inputs.endpoint }}
         MODEL: ${{ inputs.model }}
         FALLBACK_MODEL: ${{ inputs.fallback-model }}
+        CHECK_MODEL: ${{ inputs.check-model }}
         PR_NUMBER: ${{ inputs.pr-number }}
         TITLE: ${{ inputs.title }}
         SKILL: ${{ inputs.skill }}
